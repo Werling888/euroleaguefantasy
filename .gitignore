@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+data/cache/
+data/squad.json
+data/credit_overrides.json
+graphify-out/
+.claude/settings.local.json
+scripts/.projection_baseline.pkl

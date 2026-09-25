@@ -1,0 +1,42 @@
+---
+description: How the local Euroleague Fantasy dashboard runs, scores, and names its columns
+alwaysApply: true
+---
+
+# Euroleague Fantasy
+
+Personal Streamlit dashboard in this repo. Not a public site. Do not add accounts, hosting, or a new estimated-price model. Player credits come from the published list in `src/prices.py`, cached at `data/cache/fantasy_prices.parquet`. Coach credits are typed by the user.
+
+## Run
+
+```bash
+cd ~/euroleague-fantasy
+python3 -m pip install -r requirements.txt
+streamlit run app.py --server.port 8501
+```
+
+Open http://localhost:8501. Sidebar **Refresh data** updates box scores, prices, and the injury report. The first download is slow; later runs skip cached games. Cache lives in `data/cache/`. Squad file is `data/squad.json`. Do not re-download the full box-score cache unless the user asks to refresh.
+
+`main()` in `app.py` runs at import so Streamlit AppTest executes the app. Leave that call in place.
+
+## Scoring
+
+Player fantasy is PIR on a loss and PIR × 1.10 on a win. Coach points follow the official margin buckets. A legal squad is 4 guards, 4 forwards, 2 centers, 100 credits, and at most 6 players from one club. Starters, sixth man, and coach count in full. Bench counts at half. One starter is captain at 2×. Legal starting shapes (G-F-C): 2-2-1, 1-2-2, 2-1-2, 1-3-1, 3-1-1.
+
+Projected next-game points are expected minutes (60% of the last 5 games, 40% of the season) times PIR per minute, blended with last season until 8 current games, then opponent factor, home/away, and a 10% win bonus weighted by win probability. Floor and ceiling are the 20th and 80th percentile of the last 8 fantasy scores times the opponent factor only.
+
+## Columns
+
+Green is the league’s top third, yellow the middle, red the bottom. Volatility is reversed. Price is not colored.
+
+- **Status** Available when the player is confirmed to play. Yellow (Expected, Questionable, Game-time, Doubtful, Uncertain) means it is not confirmed. Out means he will not play. Players missing from the BasketNews injury report are Available. **Note** is the injury comment. Best team uses only Available players.
+- **GP** games in the sample. **Min** average minutes. **Fpts/g** fantasy points per game. **Last 5** last five games. **Per 36** per 36 minutes. **Volatility** score swing.
+- **Price** published credits. **Points per credit** Projected / Price.
+- **Projected** next-game expectation before slot multipliers. **Floor** / **Ceiling** low and high outcomes. **Counted** Projected times captain 2×, starter or sixth 1×, or bench 0.5×.
+- **Opp factor** / **Factor** points the rival allows to the position divided by the league average. Above 1 is easier. **Opponent allows** and **League allows** are those two pieces.
+- **Win %** / **Win chance** chance the club wins. **H/A** home or away. **Form** 2025-26, 2026-27, Blend, or Pos. avg.
+- **Slot** Captain, Starter, Sixth, or Bench. **Formation (G-F-C)** starters by position. **Coach price** manual.
+
+Coach points are the official margin buckets, not PIR: win 1–10 or OT +10, 11–20 +20, 21+ +25; loss 1–10 or OT −5, 11–20 −10, 21+ −20. Coach **Fpts/g**, **Last 5**, **Avg margin**, **Projected**, **Floor**, and **Ceiling** use that scale. The coach counts in full. Color coaches against other coaches. **Form** No games means the coach has no cached EuroLeague results.
+
+Saved squads live in `data/squad.json` as named teams. The active name is the one open on My team. Best team builds a new squad until **Use** is pressed for a named team. **Copy this squad** writes the result into a named team.
