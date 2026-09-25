@@ -152,7 +152,7 @@ def _show_columns(lines: list[str]) -> None:
 
 
 def _round(value, digits=1):
-    if value is None or (isinstance(value, float) and pd.isna(value)):
+    if pd.isna(value):
         return None
     return round(float(value), digits)
 
@@ -405,7 +405,7 @@ def _filter_board(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def _stored_price(value):
-    if value is None or (isinstance(value, float) and pd.isna(value)):
+    if pd.isna(value):
         return None
     number = float(value)
     if number <= 0:

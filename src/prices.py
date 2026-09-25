@@ -45,9 +45,21 @@ FIRST_NAME_ALIASES = {
     "vasilis": "vasilis",
     "antonios": "antonis",
     "antonis": "antonis",
+    "eleftherios": "lefteris",
+    "lefteris": "lefteris",
+    "maksym": "max",
+    "max": "max",
+    "omiros": "omer",
+    "omer": "omer",
     "alvaro": "alvaro",
     "william": "will",
     "will": "will",
+}
+
+# Surname spellings that refer to the same player across the two feeds.
+SURNAME_ALIASES = {
+    "lavi": "lavi",
+    "lavy": "lavi",
 }
 
 
@@ -74,7 +86,7 @@ def name_tokens(value: str) -> tuple[str, ...]:
         tokens = ["".join(lead), *rest]
     if len(tokens) >= 3:
         tokens = [tokens[0], *[token for token in tokens[1:-1] if len(token) > 1], tokens[-1]]
-    return tuple(tokens)
+    return tuple(SURNAME_ALIASES.get(token, token) for token in tokens)
 
 
 def _firsts_match(left: str, right: str) -> bool:
