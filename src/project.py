@@ -385,6 +385,9 @@ def build_dashboard(cache: dict[str, pd.DataFrame], season: str | None = None) -
     ].copy()
     if players.empty:
         players = rosters[(rosters["season_code"] == PRIOR_SEASON) & (rosters["role"] == "player")].copy()
+    from src.roster_overrides import apply_roster_overrides
+
+    players = apply_roster_overrides(players, CURRENT_SEASON)
 
     position_pir = {}
     if not logs.empty:

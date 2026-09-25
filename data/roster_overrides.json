@@ -1,0 +1,58 @@
+[
+  {
+    "person_id": "004161",
+    "person_name": "Itay Segev",
+    "team_code": "HTA",
+    "team_name": "Hapoel TLV",
+    "position_group": "C",
+    "position_name": "Center"
+  },
+  {
+    "person_id": "011193",
+    "person_name": "Tamir Blatt",
+    "team_code": "TEL",
+    "team_name": "Maccabi",
+    "position_group": "G",
+    "position_name": "Guard"
+  },
+  {
+    "person_id": "OV-HUNTER",
+    "person_name": "Shane Hunter",
+    "team_code": "TEL",
+    "team_name": "Maccabi",
+    "position_group": "C",
+    "position_name": "Center"
+  },
+  {
+    "person_id": "OV-BOURDILLON",
+    "person_name": "Frederic Bourdillon",
+    "team_code": "HTA",
+    "team_name": "Hapoel TLV",
+    "position_group": "G",
+    "position_name": "Guard"
+  },
+  {
+    "person_id": "013283",
+    "person_name": "Guy Palatin",
+    "team_code": "HTA",
+    "team_name": "Hapoel TLV",
+    "position_group": "G",
+    "position_name": "Guard"
+  },
+  {
+    "person_id": "009877",
+    "person_name": "Oz Blayzer",
+    "team_code": "HTA",
+    "team_name": "Hapoel TLV",
+    "position_group": "F",
+    "position_name": "Forward"
+  },
+  {
+    "person_id": "004451",
+    "person_name": "Ioannis Kouzeloglou",
+    "team_code": "PAN",
+    "team_name": "Panathinaikos",
+    "position_group": "F",
+    "position_name": "Forward"
+  }
+]
