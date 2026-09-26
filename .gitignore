@@ -1,8 +1,11 @@
 __pycache__/
 *.pyc
+.venv/
 data/cache/
 data/squad.json
 data/credit_overrides.json
+data/fantasy_credentials.properties
+data/fantasy_session.json
 graphify-out/
 .claude/settings.local.json
 scripts/.projection_baseline.pkl

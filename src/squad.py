@@ -46,13 +46,25 @@ def save_prices(root: Path, prices: dict) -> None:
     path.write_text(json.dumps(cleaned, indent=2), encoding="utf-8")
 
 
-def points_per_credit(projected, price) -> float | None:
-    """Projected fantasy points divided by the credit price."""
+def points_per_credit(score, price) -> float | None:
+    """Average fantasy points per game divided by the credit price."""
     number = _number(price)
-    score = _number(projected)
-    if number is None or number <= 0 or score is None:
+    value = _number(score)
+    if number is None or number <= 0 or value is None:
         return None
-    return score / number
+    return value / number
+
+
+def fill_points_per_credit(frame: pd.DataFrame) -> pd.DataFrame:
+    """Points per credit from Fpts/g (all games in the sample), not the next-game projection."""
+    if frame is None or frame.empty or "price" not in frame.columns:
+        return frame
+    scores = frame["season_fantasy"] if "season_fantasy" in frame.columns else frame.get("projected")
+    if scores is None:
+        return frame
+    frame = frame.copy()
+    frame["points_per_credit"] = [points_per_credit(score, price) for score, price in zip(scores, frame["price"])]
+    return frame
 
 
 def empty_squad() -> dict:
@@ -175,7 +187,7 @@ def credits_path(root: Path) -> Path:
 
 
 def load_credits(root: Path) -> dict:
-    """Current credits typed on Best team. Missing players keep the starting price."""
+    """Current credits typed on Best team or My team. Missing players keep the published price."""
     path = credits_path(root)
     if not path.exists():
         return {"players": {}, "coaches": {}}
@@ -203,12 +215,7 @@ def apply_player_credits(projections: pd.DataFrame, credits: dict) -> pd.DataFra
     if mapping and "player_id" in frame.columns and "price" in frame.columns:
         override = frame["player_id"].astype(str).map({str(key): value for key, value in mapping.items()})
         frame["price"] = override.where(override.notna(), frame["price"])
-        frame["points_per_credit"] = [
-            None
-            if price is None or pd.isna(price) or price == 0 or projected is None or pd.isna(projected)
-            else float(projected) / float(price)
-            for projected, price in zip(frame["projected"], frame["price"])
-        ]
+        frame = fill_points_per_credit(frame)
     return frame
 
 
@@ -256,7 +263,8 @@ def score_squad(squad: dict, projections: pd.DataFrame, coaches: pd.DataFrame) -
         multiplier = 2.0 if captain else SLOT_MULTIPLIER[slot]
         points = None if projected is None else projected * multiplier
         price = None if info is None else _number(getattr(info, "price", None))
-        per_credit = points_per_credit(projected, price)
+        avg = None if info is None else _number(getattr(info, "season_fantasy", None))
+        per_credit = points_per_credit(avg, price)
         if info is None:
             messages.append(f"{player_id} is not on the current projection board.")
         elif price is None:

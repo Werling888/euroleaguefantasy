@@ -12,8 +12,7 @@ from src.fantasy import expected_coach_points, expected_margin, win_probability
 
 CURRENT_SEASON = "E2026"
 PRIOR_SEASON = "E2025"
-FORM_GAMES = 8
-DEFENSE_GAMES = 5
+FORM_GAMES = 1
 RECENT_WINDOW = 8
 
 
@@ -51,7 +50,6 @@ def _coach_stats(logs: pd.DataFrame) -> dict:
         return empty
     current = logs[logs["season_code"] == CURRENT_SEASON].sort_values("date")
     prior = logs[logs["season_code"] == PRIOR_SEASON].sort_values("date")
-    games = len(current)
 
     def _mean(frame: pd.DataFrame) -> float | None:
         if frame.empty:
@@ -60,28 +58,20 @@ def _coach_stats(logs: pd.DataFrame) -> dict:
 
     current_avg = _mean(current)
     prior_avg = _mean(prior)
-    if games >= FORM_GAMES and current_avg is not None:
+    if current_avg is not None:
         sample = current
         source = CURRENT_SEASON
-    elif games == 0 and prior_avg is not None:
+    elif prior_avg is not None:
         sample = prior
         source = PRIOR_SEASON
-    elif games == 0:
-        return empty
-    elif prior_avg is None:
-        sample = current
-        source = CURRENT_SEASON
     else:
-        sample = pd.concat([prior, current], ignore_index=True).sort_values("date")
-        source = "blend"
-    ordered = sample  # current/prior/blend are all already date-sorted above
+        return empty
+    ordered = sample
     points = ordered["coach_points"]
     recent = points.tail(RECENT_WINDOW)
     return {
         "sample_gp": int(len(ordered)),
-        "season_fantasy": float(points.mean()) if source != "blend" else float(
-            (1.0 - games / FORM_GAMES) * prior_avg + (games / FORM_GAMES) * current_avg
-        ),
+        "season_fantasy": float(points.mean()),
         "last5_fantasy": float(points.tail(5).mean()),
         "volatility": float(points.std(ddof=0)) if len(points) else None,
         "avg_margin": float(ordered["margin"].mean()),
@@ -102,153 +92,200 @@ def _played_regular(player_games: pd.DataFrame) -> pd.DataFrame:
     return logs
 
 
+def _form_sample(current: pd.DataFrame, prior: pd.DataFrame) -> pd.DataFrame:
+    """This season if it has a game; otherwise last season."""
+    if current is not None and not current.empty:
+        return current
+    if prior is not None and not prior.empty:
+        return prior
+    return pd.DataFrame()
+
+
 def _baseline_pir(logs: pd.DataFrame) -> float | None:
     if logs is None or logs.empty:
         return None
-    ordered = logs.sort_values("date")
-    season_avg = float(ordered["pir"].mean())
-    last5 = float(ordered.tail(5)["pir"].mean())
-    return 0.6 * last5 + 0.4 * season_avg
+    return float(logs["pir"].mean())
 
 
 def _blend_baseline(current: pd.DataFrame, prior: pd.DataFrame) -> tuple[float | None, str]:
-    """60/40 recent form, fading last season until 8 current games exist."""
-    current_base = _baseline_pir(current)
-    prior_base = _baseline_pir(prior)
-    games = 0 if current is None else len(current)
-    if games >= FORM_GAMES and current_base is not None:
-        return current_base, CURRENT_SEASON
-    if games == 0:
-        if prior_base is None:
-            return None, "none"
-        return prior_base, PRIOR_SEASON
-    if prior_base is None:
-        return current_base, CURRENT_SEASON
-    prior_weight = 1.0 - games / FORM_GAMES
-    blended = prior_weight * prior_base + (1.0 - prior_weight) * current_base
-    return blended, "blend"
+    """PIR per game from this season if he has played; otherwise last season."""
+    sample = _form_sample(current, prior)
+    if sample.empty:
+        return None, "none"
+    source = CURRENT_SEASON if current is not None and not current.empty else PRIOR_SEASON
+    return _baseline_pir(sample), source
 
 
 def _playing_time(logs: pd.DataFrame) -> tuple[float | None, float | None]:
-    """Expected minutes, and PIR produced per minute over the same games."""
+    """Average minutes in the sample, and fantasy points produced per minute."""
     if logs is None or logs.empty:
         return None, None
-    ordered = logs  # grouped logs are pre-sorted by date in build_dashboard
-    played_minutes = ordered["minutes"].fillna(0)
+    played_minutes = logs["minutes"].fillna(0)
     total_minutes = float(played_minutes.sum())
     if total_minutes < 1:
         return None, None
-    last_minutes = float(played_minutes.tail(5).mean())
-    season_minutes = float(played_minutes.mean())
-    rate = float(ordered["pir"].fillna(0).sum()) / total_minutes
-    return 0.6 * last_minutes + 0.4 * season_minutes, rate
+    rate = float(logs["fantasy"].fillna(0).sum()) / total_minutes
+    return float(played_minutes.mean()), rate
 
 
 def _blend_playing_time(current: pd.DataFrame, prior: pd.DataFrame) -> tuple[float | None, float | None, str]:
-    """Baseline fantasy from how long the player is on the floor times PIR per minute."""
+    """This season's average minutes and fantasy if he has played; otherwise last season."""
     current_minutes, current_rate = _playing_time(current)
+    if current_minutes is not None:
+        return current_minutes, current_minutes * current_rate, CURRENT_SEASON
     prior_minutes, prior_rate = _playing_time(prior)
-    current_base = None if current_minutes is None else current_minutes * current_rate
-    prior_base = None if prior_minutes is None else prior_minutes * prior_rate
-    games = 0 if current is None else len(current)
-    if games >= FORM_GAMES and current_base is not None:
-        return current_minutes, current_base, CURRENT_SEASON
-    if games == 0:
-        if prior_base is None:
-            return None, None, "none"
-        return prior_minutes, prior_base, PRIOR_SEASON
-    if prior_base is None or current_minutes is None or prior_minutes is None:
-        return current_minutes, current_base, CURRENT_SEASON
-    weight = games / FORM_GAMES
-    return (
-        weight * current_minutes + (1.0 - weight) * prior_minutes,
-        weight * current_base + (1.0 - weight) * prior_base,
-        "blend",
-    )
+    if prior_minutes is not None:
+        return prior_minutes, prior_minutes * prior_rate, PRIOR_SEASON
+    return None, None, "none"
 
 
 def _home_away_ratios(logs: pd.DataFrame) -> tuple[float, float]:
-    """Home and away PIR multipliers from one split of the same logs."""
+    """Home and away fantasy multipliers from one split of the same logs."""
     if logs is None or logs.empty:
         return 1.0, 1.0
     home = logs[logs["is_home"] == True]  # noqa: E712
     away = logs[logs["is_home"] == False]  # noqa: E712
     if len(home) < 3 or len(away) < 3:
         return 1.0, 1.0
-    overall = float(logs["pir"].mean())
+    overall = float(logs["fantasy"].mean())
     if abs(overall) < 1:
         return 1.0, 1.0
-    return float(home["pir"].mean()) / overall, float(away["pir"].mean()) / overall
+    return float(home["fantasy"].mean()) / overall, float(away["fantasy"].mean()) / overall
 
 
 def _recent_fantasy(current: pd.DataFrame, prior: pd.DataFrame) -> pd.Series:
     # grouped logs are pre-sorted by date in build_dashboard
-    current_ordered = current
-    prior_ordered = prior
-    current_values = (
-        current_ordered["fantasy"] if current_ordered is not None and not current_ordered.empty else pd.Series(dtype=float)
-    )
-    if len(current_values) >= RECENT_WINDOW:
-        return current_values.tail(RECENT_WINDOW)
-    need = RECENT_WINDOW - len(current_values)
-    prior_values = (
-        prior_ordered["fantasy"].tail(need)
-        if prior_ordered is not None and not prior_ordered.empty
-        else pd.Series(dtype=float)
-    )
-    return pd.concat([prior_values, current_values], ignore_index=True)
+    if current is not None and not current.empty:
+        return current["fantasy"].tail(RECENT_WINDOW)
+    if prior is not None and not prior.empty:
+        return prior["fantasy"].tail(RECENT_WINDOW)
+    return pd.Series(dtype=float)
 
 
-def _defense_tables(logs: pd.DataFrame) -> tuple[dict, dict, dict]:
-    """League fantasy allowed, opponent fantasy allowed, and games played."""
-    league: dict[tuple, float] = {}
-    allowed: dict[tuple, float] = {}
-    games: dict[tuple, int] = {}
-    if logs.empty:
-        return league, allowed, games
-    usable = logs.dropna(subset=["position_group"])
-    for (season, position), group in usable.groupby(["season_code", "position_group"]):
-        league[(season, position)] = float(group["fantasy"].mean())
-    for (season, opponent, position), group in usable.groupby(
-        ["season_code", "opponent_code", "position_group"]
-    ):
-        allowed[(season, opponent, position)] = float(group["fantasy"].mean())
-    for (season, team), group in logs.groupby(["season_code", "team_code"]):
-        games[(season, team)] = int(group["game_code"].nunique())
-    return league, allowed, games
+# Game pie: total G/F/C fantasy vs that defense. One starter's 31 is that
+# night's C slot, not what every opposing center will score.
+FACTOR_SHRINK_GAMES = 4
+FACTOR_FLOOR = 0.75
+FACTOR_CEILING = 1.35
+
+
+def _position_game_pies(logs: pd.DataFrame, season: str) -> pd.DataFrame:
+    """One row per defense, game, and position: sum of that position's fantasy."""
+    empty = pd.DataFrame(columns=["opponent_code", "game_code", "position_group", "pie", "date"])
+    if logs is None or logs.empty:
+        return empty
+    subset = logs[logs["season_code"] == season].copy()
+    if subset.empty:
+        return empty
+    subset = subset[subset["position_group"].isin(["G", "F", "C"])]
+    if subset.empty:
+        return empty
+    if "date" in subset.columns:
+        subset["date"] = pd.to_datetime(subset["date"], utc=True, errors="coerce")
+    else:
+        subset["date"] = pd.NaT
+    return subset.groupby(["opponent_code", "game_code", "position_group"], as_index=False).agg(
+        pie=("fantasy", "sum"),
+        date=("date", "max"),
+    )
+
+
+def _means_from_pies(pies: pd.DataFrame) -> tuple[dict[str, float], dict[tuple[str, str], float]]:
+    league: dict[str, float] = {}
+    allowed: dict[tuple[str, str], float] = {}
+    if pies is None or pies.empty:
+        return league, allowed
+    for position, group in pies.groupby("position_group"):
+        league[str(position)] = float(group["pie"].mean())
+    for (opponent, position), group in pies.groupby(["opponent_code", "position_group"]):
+        allowed[(str(opponent), str(position))] = float(group["pie"].mean())
+    return league, allowed
+
+
+def _windows_from_pies(pies: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, float], dict[str, int]]:
+    empty = pd.DataFrame(
+        columns=["opponent_code", "position_group", "l3", "l5", "l10", "allowed_all", "games"]
+    )
+    league, _allowed = _means_from_pies(pies)
+    games: dict[str, int] = {}
+    if pies is None or pies.empty:
+        return empty, league, games
+
+    def window_mean(frame: pd.DataFrame, codes: list) -> float | None:
+        sample = frame[frame["game_code"].isin(codes)]
+        if sample.empty:
+            return None
+        return float(sample["pie"].mean())
+
+    rows = []
+    for opponent, club in pies.groupby("opponent_code"):
+        order = club.groupby("game_code")["date"].max().sort_values(ascending=False, na_position="last")
+        game_ids = list(order.index)
+        games[str(opponent)] = len(game_ids)
+        for position in ("G", "F", "C"):
+            at_pos = club[club["position_group"] == position]
+            rows.append(
+                {
+                    "opponent_code": opponent,
+                    "position_group": position,
+                    "l3": window_mean(at_pos, game_ids[:3]),
+                    "l5": window_mean(at_pos, game_ids[:5]),
+                    "l10": window_mean(at_pos, game_ids[:10]),
+                    "allowed_all": window_mean(at_pos, game_ids),
+                    "games": len(game_ids),
+                }
+            )
+    return pd.DataFrame(rows), league, games
+
+
+def _defense_profiles(logs: pd.DataFrame):
+    """Current-season G/F/C game pies, plus last season's means for shrinkage."""
+    current = _position_game_pies(logs, CURRENT_SEASON)
+    profiles, league, games = _windows_from_pies(current)
+    prior_league, prior_allowed = _means_from_pies(_position_game_pies(logs, PRIOR_SEASON))
+    return profiles, league, games, prior_league, prior_allowed
+
+
+def _shrink_factor(current: float | None, prior: float | None, games: int) -> float:
+    center = 1.0 if prior is None else float(prior)
+    if current is None:
+        return max(FACTOR_FLOOR, min(FACTOR_CEILING, center))
+    n = max(int(games), 0)
+    if n <= 0:
+        return max(FACTOR_FLOOR, min(FACTOR_CEILING, center))
+    raw = (n * float(current) + FACTOR_SHRINK_GAMES * center) / (n + FACTOR_SHRINK_GAMES)
+    return max(FACTOR_FLOOR, min(FACTOR_CEILING, raw))
 
 
 def _opponent_factor(
     opponent: str,
     position: str | None,
-    league: dict,
-    allowed: dict,
-    games: dict,
+    league: dict[str, float],
+    profiles: pd.DataFrame,
+    prior_league: dict[str, float] | None = None,
+    prior_allowed: dict[tuple[str, str], float] | None = None,
 ) -> float:
     if position not in {"G", "F", "C"}:
         return 1.0
-    current_games = games.get((CURRENT_SEASON, opponent), 0)
-    current_raw = allowed.get((CURRENT_SEASON, opponent, position))
-    current_league = league.get((CURRENT_SEASON, position))
-    prior_raw = allowed.get((PRIOR_SEASON, opponent, position))
-    prior_league = league.get((PRIOR_SEASON, position))
-
-    def ratio(raw, base) -> float | None:
-        if raw is None or base in (None, 0):
-            return None
-        return raw / base
-
-    current_factor = ratio(current_raw, current_league)
-    prior_factor = ratio(prior_raw, prior_league)
-    if current_games >= DEFENSE_GAMES and current_factor is not None:
-        return current_factor
-    if current_games == 0 or current_factor is None:
-        return prior_factor if prior_factor is not None else 1.0
-    shrunk = 1.0 + (current_games / DEFENSE_GAMES) * (current_factor - 1.0)
-    if prior_factor is None:
-        return shrunk
-    weight = current_games / DEFENSE_GAMES
-    return weight * shrunk + (1.0 - weight) * prior_factor
+    prior_league = prior_league or {}
+    prior_allowed = prior_allowed or {}
+    hit = pd.DataFrame()
+    if profiles is not None and not profiles.empty:
+        hit = profiles[(profiles["opponent_code"] == opponent) & (profiles["position_group"] == position)]
+    current_raw = None if hit.empty else hit.iloc[0]["allowed_all"]
+    n = 0 if hit.empty else int(hit.iloc[0]["games"])
+    if current_raw is not None and pd.isna(current_raw):
+        current_raw = None
+    base = league.get(position)
+    current = None if current_raw is None or not base else float(current_raw) / float(base)
+    prior_raw = prior_allowed.get((opponent, position))
+    prior_base = prior_league.get(position)
+    prior = None if prior_raw is None or not prior_base else float(prior_raw) / float(prior_base)
+    if n >= 1 and current is not None:
+        return _shrink_factor(current, prior, n)
+    if prior is not None:
+        return _shrink_factor(None, prior, 0)
+    return 1.0
 
 
 def _net_lookup(standings: pd.DataFrame) -> dict[tuple, tuple[float, int]]:
@@ -266,12 +303,10 @@ def _net_lookup(standings: pd.DataFrame) -> dict[tuple, tuple[float, int]]:
 def _team_net(team: str, nets: dict) -> float:
     current = nets.get((CURRENT_SEASON, team))
     prior = nets.get((PRIOR_SEASON, team))
-    if current and current[1] >= DEFENSE_GAMES:
+    if current:
         return current[0]
     if prior:
         return prior[0]
-    if current:
-        return current[0]
     return 0.0
 
 
@@ -314,7 +349,7 @@ def _schedule_index(upcoming: pd.DataFrame, limit: int = 5) -> dict[str, list[di
 
 
 def _sample_averages(current: pd.DataFrame, prior: pd.DataFrame):
-    sample = current if current is not None and not current.empty else prior
+    sample = _form_sample(current, prior)
     empty = (None, None, None, 0, None, None, 0)
     if sample is None or sample.empty:
         return empty
@@ -332,8 +367,8 @@ def _sample_averages(current: pd.DataFrame, prior: pd.DataFrame):
 def build_dashboard(cache: dict[str, pd.DataFrame], season: str | None = None) -> DashboardData:
     """Project every active player and coach for the upcoming round.
 
-    `season` limits the form, matchups, and win chances to one season's games.
-    None blends the two seasons.
+    `season` limits logs to one season. None uses this season for anyone who has played,
+    and last season only when that player (or defense) has no game yet.
     """
     logs = _played_regular(cache["player_games"])
     rosters = cache["rosters"]
@@ -347,7 +382,18 @@ def build_dashboard(cache: dict[str, pd.DataFrame], season: str | None = None) -
             standings = standings[standings["season_code"] == season]
         if not coach_logs.empty:
             coach_logs = coach_logs[coach_logs["season_code"] == season]
-    league, allowed, games_played = _defense_tables(logs)
+    players = rosters[
+        (rosters["season_code"] == CURRENT_SEASON) & (rosters["role"] == "player")
+    ].copy()
+    if players.empty:
+        players = rosters[(rosters["season_code"] == PRIOR_SEASON) & (rosters["role"] == "player")].copy()
+    from src.roster_overrides import apply_roster_overrides
+    from src.prices import apply_fantasy_positions, apply_fantasy_positions_to_logs
+
+    players = apply_roster_overrides(players, CURRENT_SEASON)
+    players = apply_fantasy_positions(players, cache.get("prices"))
+    logs = apply_fantasy_positions_to_logs(logs, players)
+    profiles, league, _games_played, prior_league, prior_allowed = _defense_profiles(logs)
     nets = _net_lookup(standings)
     upcoming = _next_games(games)
     schedule_by_team = _schedule_index(upcoming, limit=5)
@@ -377,23 +423,18 @@ def build_dashboard(cache: dict[str, pd.DataFrame], season: str | None = None) -
     def opp_factor(opponent: str, position: str | None) -> float:
         key = (opponent, position)
         if key not in factor_memo:
-            factor_memo[key] = _opponent_factor(opponent, position, league, allowed, games_played)
+            factor_memo[key] = _opponent_factor(
+                opponent, position, league, profiles, prior_league, prior_allowed
+            )
         return factor_memo[key]
 
-    players = rosters[
-        (rosters["season_code"] == CURRENT_SEASON) & (rosters["role"] == "player")
-    ].copy()
-    if players.empty:
-        players = rosters[(rosters["season_code"] == PRIOR_SEASON) & (rosters["role"] == "player")].copy()
-    from src.roster_overrides import apply_roster_overrides
-
-    players = apply_roster_overrides(players, CURRENT_SEASON)
-
-    position_pir = {}
+    position_avg = {}
     if not logs.empty:
-        prior_logs_all = logs[logs["season_code"] == PRIOR_SEASON]
-        for position, group in prior_logs_all.groupby("position_group"):
-            position_pir[position] = float(group["pir"].mean())
+        current_all = logs[logs["season_code"] == CURRENT_SEASON]
+        prior_all = logs[logs["season_code"] == PRIOR_SEASON]
+        fill = current_all if not current_all.empty else prior_all
+        for position, group in fill.groupby("position_group"):
+            position_avg[position] = float(group["fantasy"].mean())
 
     grouped = {
         (season, player_id): group.sort_values("date")
@@ -405,24 +446,20 @@ def build_dashboard(cache: dict[str, pd.DataFrame], season: str | None = None) -
         current_logs = grouped.get((CURRENT_SEASON, player.person_id), pd.DataFrame())
         prior_logs = grouped.get((PRIOR_SEASON, player.person_id), pd.DataFrame())
         position = player.position_group
-        if position not in {"G", "F", "C"} and not prior_logs.empty:
-            mode = prior_logs["position_group"].dropna().mode()
+        if position not in {"G", "F", "C"}:
+            mode_logs = _form_sample(current_logs, prior_logs)
+            mode = mode_logs["position_group"].dropna().mode() if not mode_logs.empty else pd.Series(dtype=object)
             position = mode.iloc[0] if not mode.empty else None
         expected_minutes, baseline, source = _blend_playing_time(current_logs, prior_logs)
-        if baseline is None and position in position_pir:
-            baseline = position_pir[position]
+        if baseline is None and position in position_avg:
+            baseline = position_avg[position]
             source = "position"
             expected_minutes = None
         season_fantasy, last5, minutes, gp_current, per36, volatility, sample_gp = _sample_averages(
             current_logs, prior_logs
         )
-        pieces = [
-            frame
-            for frame in (prior_logs, current_logs)
-            if frame is not None and not frame.empty
-        ]
-        context_logs = pd.concat(pieces, ignore_index=True) if pieces else pd.DataFrame()
-        home_ratio, away_ratio = _home_away_ratios(context_logs)
+        form_logs = _form_sample(current_logs, prior_logs)
+        home_ratio, away_ratio = _home_away_ratios(form_logs)
         schedule = []
         if baseline is not None:
             recent = _recent_fantasy(current_logs, prior_logs)
@@ -432,6 +469,8 @@ def build_dashboard(cache: dict[str, pd.DataFrame], season: str | None = None) -
                 margin, chance = game_outlook(
                     player.team_code, game["opponent_code"], game["is_home"]
                 )
+                # baseline is Fpts/g. factor is this team's G/F/C game pie versus
+                # the league pie, shrunk while few games are in.
                 projected = baseline * factor * ratio * (1.0 + 0.10 * chance)
                 schedule.append(
                     {
@@ -499,9 +538,10 @@ def build_dashboard(cache: dict[str, pd.DataFrame], season: str | None = None) -
     from src.prices import assign_prices
 
     projections = assign_prices(projections, cache.get("prices"))
-    from src.injuries import assign_availability
+    from src.injuries import apply_injury_minutes, assign_availability
 
     projections = assign_availability(projections, cache.get("injuries"))
+    projections = apply_injury_minutes(projections)
     if not projections.empty:
         projections = projections.sort_values(
             ["projected", "season_fantasy"], ascending=False, na_position="last"
@@ -572,9 +612,20 @@ def build_dashboard(cache: dict[str, pd.DataFrame], season: str | None = None) -
         win_prob = game_outlook(team, nxt["opponent_code"], nxt["is_home"])[1]
         for position in ("G", "F", "C"):
             factor = opp_factor(nxt["opponent_code"], position)
-            league_avg = league.get((PRIOR_SEASON, position))
-            if games_played.get((CURRENT_SEASON, nxt["opponent_code"]), 0) >= DEFENSE_GAMES:
-                league_avg = league.get((CURRENT_SEASON, position), league_avg)
+            league_avg = league.get(position)
+            hit = profiles[
+                (profiles["opponent_code"] == nxt["opponent_code"])
+                & (profiles["position_group"] == position)
+            ]
+            allowed_all = l3 = l5 = l10 = None
+            sample_games = 0
+            if not hit.empty:
+                row = hit.iloc[0]
+                allowed_all = None if pd.isna(row["allowed_all"]) else float(row["allowed_all"])
+                l3 = None if pd.isna(row["l3"]) else float(row["l3"])
+                l5 = None if pd.isna(row["l5"]) else float(row["l5"])
+                l10 = None if pd.isna(row["l10"]) else float(row["l10"])
+                sample_games = int(row["games"])
             defense_rows.append(
                 {
                     "team_code": team,
@@ -587,7 +638,11 @@ def build_dashboard(cache: dict[str, pd.DataFrame], season: str | None = None) -
                     "position_group": position,
                     "league_allowed": league_avg,
                     "opp_factor": factor,
-                    "opp_allowed": None if league_avg in (None, 0) else factor * league_avg,
+                    "opp_allowed": allowed_all,
+                    "l3": l3,
+                    "l5": l5,
+                    "l10": l10,
+                    "defense_games": sample_games,
                 }
             )
     defense = pd.DataFrame(defense_rows)

@@ -11,9 +11,19 @@ FORMATIONS = ((2, 2, 1), (1, 2, 2), (2, 1, 2), (1, 3, 1), (3, 1, 1))
 BACKUP_FORMATIONS = ((2, 2, 1), (1, 3, 1), (3, 1, 1))
 ROSTER = {"G": 4, "F": 4, "C": 2}
 MAX_SAME_TEAM = 6
+# First tip day of the round. Later days (T2, T3) stay on the roster to replace a dud.
+MAX_TURN1 = 6
 SLOT_ORDER = {"Captain": 0, "Starter": 1, "Sixth": 2, "Bench": 3}
 STARTER_DEPTH = {"G": 8, "F": 8, "C": 6}
 PLAY_MINUTES = 15.0
+
+
+def _pid(value) -> str:
+    """Same player in squad.json and the board, with or without leading zeros."""
+    text = str(value or "").strip()
+    if text.isdigit():
+        return f"{int(text):06d}"
+    return text
 
 
 def _value_pool(players: list[dict], depth: int) -> list[dict]:
@@ -30,6 +40,51 @@ def _minutes(player: dict) -> float:
 
 def _plays(player: dict) -> bool:
     return _minutes(player) >= PLAY_MINUTES
+
+
+def _turn_days(*groups) -> list:
+    """Ordered tip days in this slate: T1, then T2, then T3."""
+    days = set()
+    for group in groups:
+        if group is None:
+            continue
+        if isinstance(group, dict):
+            players = [player for bucket in group.values() for player in bucket]
+        else:
+            players = group
+        for player in players:
+            if not isinstance(player, dict):
+                continue
+            day = player.get("game_day")
+            if day is not None:
+                days.add(day)
+    return sorted(days)
+
+
+def _is_t1(player: dict, first) -> bool:
+    if (player.get("turn") or "") == "T1":
+        return True
+    return first is not None and player.get("game_day") == first
+
+
+def _turns_ok(squad: list[dict], turn_days: list) -> bool:
+    """At most six players on T1 when the round has a later day to sub from."""
+    if len(turn_days) < 2:
+        return True
+    first = turn_days[0]
+    return sum(1 for player in squad if _is_t1(player, first)) <= MAX_TURN1
+
+
+def _t1_room(owned: dict, turn_days: list) -> int:
+    if len(turn_days) < 2:
+        return MAX_TURN1
+    return max(0, MAX_TURN1 - owned.get(turn_days[0], 0))
+
+
+def _stamp_turns(records: list[dict]) -> None:
+    labels = {day: f"T{index + 1}" for index, day in enumerate(_turn_days(records))}
+    for player in records:
+        player["turn"] = labels.get(player.get("game_day")) or ""
 
 
 def _slate_share(by_pos: dict[str, list[dict]]) -> dict:
@@ -76,9 +131,12 @@ def _search_formations(starter_pool, cheapest_by_pos, upgrades_by_pos, spend_cap
         centers = starter_pool["C"]
         if len(guards) < guards_needed or len(forwards) < forwards_needed or len(centers) < centers_needed:
             continue
+        tried = 0
+        found = False
         for guard_set in combinations(guards, guards_needed):
             for forward_set in combinations(forwards, forwards_needed):
                 for center_set in combinations(centers, centers_needed):
+                    tried += 1
                     starters = list(guard_set) + list(forward_set) + list(center_set)
                     if sum(player["price"] for player in starters) > spend_cap:
                         continue
@@ -86,9 +144,21 @@ def _search_formations(starter_pool, cheapest_by_pos, upgrades_by_pos, spend_cap
                     if filled is None:
                         continue
                     sixth, bench = filled
+                    if not _turns_ok([*starters, sixth, *bench], _turn_days(cheapest_by_pos)):
+                        continue
                     total = _score(starters, sixth, bench, coach_points)
-                    if best is None or total > best[0]:
-                        best = (total, starters, sixth, bench)
+                    spent = sum(player["price"] for player in [*starters, sixth, *bench])
+                    if best is None or total > best[0] + 1e-9 or (abs(total - best[0]) < 1e-9 and spent > best[4]):
+                        best = (total, starters, sixth, bench, spent)
+                    found = True
+                    if tried >= 250 and found:
+                        break
+                else:
+                    continue
+                break
+            else:
+                continue
+            break
     return best
 
 
@@ -121,7 +191,7 @@ def _records(projections: pd.DataFrame, day: pd.Timestamp | None) -> list[dict]:
     for row in frame.itertuples(index=False):
         records.append(
             {
-                "player_id": row.player_id,
+                "player_id": _pid(row.player_id),
                 "player_name": row.player_name,
                 "team_code": row.team_code,
                 "team_name": row.team_name,
@@ -140,9 +210,11 @@ def _records(projections: pd.DataFrame, day: pd.Timestamp | None) -> list[dict]:
                 "availability": getattr(row, "availability", "available") or "available",
                 "status_label": getattr(row, "status_label", "Available") or "Available",
                 "injury_note": getattr(row, "injury_note", "") or "",
+                "form_source": getattr(row, "form_source", "") or "",
             }
         )
     records.sort(key=lambda player: player["projected"], reverse=True)
+    _stamp_turns(records)
     return records
 
 
@@ -182,6 +254,8 @@ def _take(player: dict, need: dict[str, int], counts: dict[str, int], money: flo
 
 def _cheap_reserves(need: dict[str, int], counts: dict[str, int], money: float, used: set[str], cheapest_by_pos: dict[str, list[dict]], share: dict, owned: dict):
     reserves = []
+    turn_days = _turn_days(cheapest_by_pos)
+    first = turn_days[0] if len(turn_days) >= 2 else None
     for position, required in need.items():
         playable = [player for player in cheapest_by_pos[position] if _plays(player)]
         pool = playable if len(playable) >= required else cheapest_by_pos[position]
@@ -189,14 +263,20 @@ def _cheap_reserves(need: dict[str, int], counts: dict[str, int], money: float, 
         while taken < required:
             best = None
             best_rank = None
+            t1_room = _t1_room(owned, turn_days)
+            later_miss = {day for day in turn_days[1:] if owned.get(day, 0) == 0}
             for player in pool:
                 if player["player_id"] in used or player["price"] > money + 1e-6:
                     continue
                 if counts.get(player["team_code"], 0) >= MAX_SAME_TEAM:
                     continue
+                is_t1 = _is_t1(player, first)
+                if is_t1 and t1_room <= 0:
+                    continue
                 rank = (
                     0 if _plays(player) else 1,
-                    -_day_need(player.get("game_day"), owned, share),
+                    0 if player.get("game_day") in later_miss else 1,
+                    0 if not is_t1 else 1,
                     player["price"],
                     -player["projected"],
                 )
@@ -216,6 +296,8 @@ def _cheap_reserves(need: dict[str, int], counts: dict[str, int], money: float, 
 
 def _upgrade_reserves(reserves, leftover, counts, used, upgrades_by_pos, share, owned):
     """Spend leftover credits on the reserve that gains the most projected points."""
+    turn_days = _turn_days(upgrades_by_pos)
+    first = turn_days[0] if len(turn_days) >= 2 else None
     for _ in range(10):
         best = None
         for index, current in enumerate(reserves):
@@ -230,6 +312,13 @@ def _upgrade_reserves(reserves, leftover, counts, used, upgrades_by_pos, share, 
                     len(share) > 1
                     and current.get("game_day") != candidate.get("game_day")
                     and owned.get(current.get("game_day"), 0) <= 1
+                ):
+                    continue
+                if (
+                    first is not None
+                    and _is_t1(candidate, first)
+                    and not _is_t1(current, first)
+                    and owned.get(first, 0) >= MAX_TURN1
                 ):
                     continue
                 extra = candidate["price"] - current["price"]
@@ -288,6 +377,8 @@ def _fill_rest(starters: list[dict], cheapest_by_pos: dict[str, list[dict]], upg
     reserves = _upgrade_reserves(reserves, leftover, reserve_counts, reserve_ids, upgrades_by_pos, share, owned)
     if len(reserves) != 5:
         return None
+    if not _turns_ok(starters + reserves, _turn_days(cheapest_by_pos)):
+        return None
     sixth = max(reserves, key=lambda player: player["projected"])
     bench = [player for player in reserves if player is not sixth]
     return sixth, bench
@@ -342,6 +433,8 @@ def _improve(starters, sixth, bench, available, budget, coach_points):
                             continue
                     if not _backup_center(trial_starters, rest):
                         continue
+                    if not _turns_ok(lineup, _turn_days(available, lineup)):
+                        continue
                     score = _score(trial_starters, trial_sixth, trial_bench, coach_points)
                     if score > best_score + 0.05:
                         current = (trial_starters, trial_sixth, trial_bench, score)
@@ -350,6 +443,68 @@ def _improve(starters, sixth, bench, available, budget, coach_points):
         if not improved:
             break
     return current[0], current[1], current[2]
+
+
+def _lineup_legal(starters, sixth, bench, budget, available) -> bool:
+    lineup = starters + [sixth] + bench
+    if sum(player["price"] for player in lineup) > budget + 1e-6:
+        return False
+    counts = {"G": 0, "F": 0, "C": 0}
+    for player in lineup:
+        counts[player["position_group"]] += 1
+    if counts != ROSTER:
+        return False
+    if not _cap_ok(_team_counts(lineup)):
+        return False
+    shape = tuple(sum(player["position_group"] == position for player in starters) for position in ("G", "F", "C"))
+    if shape not in BACKUP_FORMATIONS:
+        return False
+    if not _backup_center(starters, [sixth] + bench):
+        return False
+    if not _turns_ok(lineup, _turn_days(available, lineup)):
+        return False
+    return True
+
+
+def _spend_leftover(starters, sixth, bench, available, budget, held_ids: set[str] | None = None):
+    """Spend leftover credits on a same-position upgrade that does not lose projected points."""
+    held = {_pid(player_id) for player_id in (held_ids or set())}
+    by_pos = {position: [player for player in available if player["position_group"] == position] for position in ROSTER}
+    for _ in range(12):
+        leftover = budget - sum(player["price"] for player in starters + [sixth] + bench)
+        if leftover < 0.5:
+            return starters, sixth, bench
+        ids = {player["player_id"] for player in starters + [sixth] + bench}
+        best = None
+        roles = [("starter", player) for player in starters] + [("sixth", sixth)] + [("bench", player) for player in bench]
+        for role, target in roles:
+            if held and _pid(target["player_id"]) in held:
+                continue
+            for candidate in by_pos[target["position_group"]]:
+                if candidate["player_id"] in ids:
+                    continue
+                extra = candidate["price"] - target["price"]
+                if extra <= 0.05 or extra > leftover + 1e-6:
+                    continue
+                if candidate["projected"] + 0.05 < target["projected"]:
+                    continue
+                if role == "starter":
+                    trial_starters = [candidate if player is target else player for player in starters]
+                    trial_sixth, trial_bench = sixth, bench
+                elif role == "sixth":
+                    trial_starters, trial_sixth, trial_bench = starters, candidate, bench
+                else:
+                    trial_starters, trial_sixth = starters, sixth
+                    trial_bench = [candidate if player is target else player for player in bench]
+                if not _lineup_legal(trial_starters, trial_sixth, trial_bench, budget, available):
+                    continue
+                rank = (candidate["projected"] - target["projected"], extra)
+                if best is None or rank > best[0]:
+                    best = (rank, trial_starters, trial_sixth, trial_bench)
+        if best is None:
+            return starters, sixth, bench
+        _rank, starters, sixth, bench = best
+    return starters, sixth, bench
 
 
 def _window_sum(schedule, horizon: int) -> float | None:
@@ -368,13 +523,6 @@ def _apply_horizon(projections: pd.DataFrame, coaches: pd.DataFrame, horizon: in
     frame = projections.copy()
     if "schedule" in frame.columns:
         frame["projected"] = frame["schedule"].map(lambda schedule: _window_sum(schedule, horizon))
-        if "price" in frame.columns:
-            frame["points_per_credit"] = [
-                None
-                if price is None or pd.isna(price) or price == 0 or projected is None or pd.isna(projected)
-                else float(projected) / float(price)
-                for projected, price in zip(frame["projected"], frame["price"])
-            ]
     coach_frame = coaches
     if coaches is not None and not coaches.empty and "schedule" in coaches.columns:
         coach_frame = coaches.copy()
@@ -403,22 +551,36 @@ def _best_slots(players: list[dict], coach_points: float):
     return best
 
 
-def _best_adds(pool: list[dict], need: dict[str, int], money: float, counts: dict[str, int]) -> list[list[dict]]:
+def _best_adds(
+    pool: list[dict],
+    need: dict[str, int],
+    money: float,
+    counts: dict[str, int],
+    remain: list[dict] | None = None,
+) -> list[list[dict]]:
+    remain = remain or []
+    turn_days = _turn_days(pool, remain)
+    first = turn_days[0] if len(turn_days) >= 2 else None
+    t1_have = sum(1 for player in remain if _is_t1(player, first))
     groups = {}
     for position, count in need.items():
         if count <= 0:
             continue
         options = [player for player in pool if player["position_group"] == position]
         playing = [player for player in options if _plays(player)]
-        options = playing or options
-        options.sort(key=lambda player: player["projected"], reverse=True)
-        cheap = sorted(options, key=lambda player: player["price"])[:5]
+        ranked = playing or options
+        ranked.sort(key=lambda player: player["projected"], reverse=True)
+        cheap = sorted(ranked, key=lambda player: player["price"])[:10]
+        later = [player for player in ranked if (player.get("turn") or "") in ("T2", "T3")][:10]
         merged = []
         seen = set()
-        for player in options[:8] + cheap:
+        width = 20 if count <= 2 else 12
+        for player in ranked[:width] + cheap + later:
             if player["player_id"] not in seen:
                 seen.add(player["player_id"])
                 merged.append(player)
+        if len(merged) < count:
+            merged = ranked
         if len(merged) < count:
             return []
         groups[position] = (count, merged)
@@ -427,13 +589,16 @@ def _best_adds(pool: list[dict], need: dict[str, int], money: float, counts: dic
     found = []
     positions = list(groups)
 
-    def walk(index: int, chosen: list[dict], spent: float, team_counts: dict[str, int]) -> None:
+    def walk(index: int, chosen: list[dict], spent: float, team_counts: dict[str, int], t1_used: int) -> None:
         if index == len(positions):
             found.append((sum(player["projected"] for player in chosen), list(chosen)))
             return
         position = positions[index]
         count, options = groups[position]
         for combo in combinations(options, count):
+            extra_t1 = sum(1 for player in combo if _is_t1(player, first))
+            if first is not None and t1_used + extra_t1 > MAX_TURN1:
+                continue
             price = sum(player["price"] for player in combo)
             if spent + price > money + 1e-6:
                 continue
@@ -445,21 +610,20 @@ def _best_adds(pool: list[dict], need: dict[str, int], money: float, counts: dic
                     legal = False
                     break
             if legal:
-                walk(index + 1, chosen + list(combo), spent + price, trial)
+                walk(index + 1, chosen + list(combo), spent + price, trial, t1_used + extra_t1)
 
-    walk(0, [], 0.0, dict(counts))
+    walk(0, [], 0.0, dict(counts), t1_have)
     found.sort(key=lambda item: item[0], reverse=True)
-    return [item[1] for item in found[:8]]
+    return [item[1] for item in found[:16]]
 
 
 def _search_changes(records: list[dict], held_ids: list[str], changes: int, spend_cap: float, coach_points: float):
-    """Replace at most `changes` players from the saved squad."""
-    by_id = {player["player_id"]: player for player in records}
-    held = [by_id[player_id] for player_id in held_ids if player_id in by_id]
-    if not held:
+    """Bring in exactly `changes` new players. Keep the rest of the saved squad."""
+    by_id = {_pid(player["player_id"]): player for player in records}
+    wanted = [_pid(player_id) for player_id in held_ids]
+    kept = [by_id[player_id] for player_id in wanted if player_id in by_id]
+    if not kept:
         return ("message", "None of the saved players have a price and a projection.")
-    kept = list(held)
-    forced = 0
     for position, limit in ROSTER.items():
         group = sorted(
             (player for player in kept if player["position_group"] == position),
@@ -469,48 +633,57 @@ def _search_changes(records: list[dict], held_ids: list[str], changes: int, spen
         if overflow > 0:
             drop_ids = {player["player_id"] for player in group[:overflow]}
             kept = [player for player in kept if player["player_id"] not in drop_ids]
-            forced += overflow
-    if forced > changes:
-        return (
-            "message",
-            f"My team needs {forced} changes before it matches 4 guards, 4 forwards, and 2 centers.",
-        )
-    optional = changes - forced
     vacancies = 10 - len(kept)
-    if vacancies > optional:
+    if vacancies > changes:
+        word = "player" if changes == 1 else "players"
         return (
             "message",
-            f"My team has {len(kept)} priced players. Reaching 10 takes {vacancies} changes, and {changes} {'is' if changes == 1 else 'are'} allowed.",
+            f"{vacancies} on the saved team are Out or unconfirmed, so they have to be replaced. "
+            f"Pick {vacancies} or more changes (you picked {changes} {word}).",
         )
-    extra_swaps = optional - vacancies
+    extra_swaps = changes - vacancies
+    if extra_swaps > len(kept):
+        return ("message", "Not enough saved players left to keep after that many changes.")
     kept_ids = {player["player_id"] for player in kept}
     pool = [player for player in records if player["player_id"] not in kept_ids]
+    drop_sets = []
+    for dropped in combinations(kept, extra_swaps):
+        dropped_ids = {player["player_id"] for player in dropped}
+        remain = [player for player in kept if player["player_id"] not in dropped_ids]
+        need = {
+            position: ROSTER[position] - sum(player["position_group"] == position for player in remain)
+            for position in ROSTER
+        }
+        if any(count < 0 for count in need.values()):
+            continue
+        spent = sum(player["price"] for player in remain)
+        if spent > spend_cap + 1e-6:
+            continue
+        drop_sets.append((sum(player["projected"] for player in remain), remain, need, spent))
+    drop_sets.sort(key=lambda item: item[0], reverse=True)
     ranked = []
-    for drop_count in range(extra_swaps + 1):
-        for dropped in combinations(kept, drop_count):
-            dropped_ids = {player["player_id"] for player in dropped}
-            remain = [player for player in kept if player["player_id"] not in dropped_ids]
-            need = {
-                position: ROSTER[position] - sum(player["position_group"] == position for player in remain)
-                for position in ROSTER
-            }
-            if any(count < 0 for count in need.values()):
+    for _remain_pts, remain, need, spent in drop_sets:
+        adds = _best_adds(pool, need, spend_cap - spent, _team_counts(remain), remain)
+        for added in adds:
+            squad = remain + added
+            if len(added) != changes or len(squad) != 10 or not _cap_ok(_team_counts(squad)):
                 continue
-            spent = sum(player["price"] for player in remain)
-            if spent > spend_cap + 1e-6:
+            if sum(player["price"] for player in squad) > spend_cap + 1e-6:
                 continue
-            adds = _best_adds(pool, need, spend_cap - spent, _team_counts(remain))
-            for added in adds:
-                squad = remain + added
-                if len(squad) != 10 or not _cap_ok(_team_counts(squad)):
-                    continue
-                if sum(player["price"] for player in squad) > spend_cap + 1e-6:
-                    continue
-                ranked.append((sum(player["projected"] for player in squad), squad, {player["player_id"] for player in remain}))
-    ranked.sort(key=lambda item: item[0], reverse=True)
+            if not _turns_ok(squad, _turn_days(records)):
+                continue
+            ranked.append(
+                (
+                    sum(player["projected"] for player in squad),
+                    sum(player["price"] for player in squad),
+                    squad,
+                    {player["player_id"] for player in remain},
+                )
+            )
+    ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
     best = None
     seen = set()
-    for _raw, squad, remain_ids in ranked[:40]:
+    for _raw, _spent, squad, remain_ids in ranked[:80]:
         key = tuple(sorted(player["player_id"] for player in squad))
         if key in seen:
             continue
@@ -519,78 +692,28 @@ def _search_changes(records: list[dict], held_ids: list[str], changes: int, spen
         if slotted is None:
             continue
         total, starters, sixth, bench = slotted
-        if best is None or total > best[0]:
-            best = (total, starters, sixth, bench, remain_ids)
+        spent = sum(player["price"] for player in [*starters, sixth, *bench])
+        if best is None or total > best[0] + 1e-9 or (abs(total - best[0]) < 1e-9 and spent > best[5]):
+            best = (total, starters, sixth, bench, remain_ids, spent)
     if best is None:
-        return ("message", "No squad fits the budget within that many changes.")
-    return ("squad",) + best
+        return ("message", "No squad fits the budget, T1 cap, and positions within that many changes.")
+    return ("squad",) + best[:5]
 
 
-def build_best_team(
-    projections: pd.DataFrame,
-    coaches: pd.DataFrame,
-    coach_price: float = 0.0,
-    day: pd.Timestamp | None = None,
-    budget: float = 100.0,
-    horizon: int = 1,
-    changes: int = 10,
-    held_ids: list[str] | None = None,
-    coach_id: str | None = None,
-) -> dict:
-    """Pick 4 guards, 4 forwards, 2 centers and the best coach for one slate."""
-    horizon = max(int(horizon or 1), 1)
-    projections, coaches = _apply_horizon(projections, coaches, horizon)
-    if horizon > 1:
-        day = None
-    coach_frame = coaches
-    if day is not None and coaches is not None and not coaches.empty and "game_date" in coaches.columns:
-        local = pd.to_datetime(coaches["game_date"], utc=True, errors="coerce").dt.tz_convert("Europe/Athens")
-        coach_frame = coaches[local.dt.normalize() == day]
-    coach = None
-    coach_points = 0.0
-    chosen = None
-    if coach_id and coaches is not None and not coaches.empty:
-        match = coaches[coaches["coach_id"].astype(str) == str(coach_id)]
-        if not match.empty:
-            chosen = match.iloc[0]
-    if chosen is None and coach_frame is not None and not coach_frame.empty and coach_frame["projected"].notna().any():
-        chosen = coach_frame.sort_values("projected", ascending=False).iloc[0]
-    if chosen is not None and not pd.isna(chosen.projected):
-        coach = chosen
-        coach_points = float(chosen.projected)
-    spend_cap = budget - max(float(coach_price or 0), 0.0)
-    if projections is None or projections.empty or "price" not in projections.columns:
-        return _empty_result(
-            coach,
-            coach_points,
-            coach_price,
-            day,
-            "Published prices are not loaded, so a squad cannot be built.",
-        )
-    records = _records(projections, day)
-    held = [str(player_id) for player_id in (held_ids or [])]
-    use_changes = bool(held) and int(changes) < 10
-    if use_changes:
-        outcome = _search_changes(records, held, int(changes), spend_cap, coach_points)
-        if outcome[0] == "message":
-            return _empty_result(coach, coach_points, coach_price, day, outcome[1], horizon)
-        _kind, _total, starters, sixth, bench, remain_ids = outcome
-        starters, sixth, bench = _mark_kept(starters, sixth, bench, set(held))
-        starters, sixth, bench = _tidy_slots(starters, sixth, bench)
-        result = _present(
-            {"starters": starters, "sixth": sixth, "bench": bench, "total": _score(starters, sixth, bench, coach_points)},
-            coach,
-            coach_points,
-            coach_price,
-            day,
-            horizon,
-        )
-        chosen = [player["player_id"] for player in starters + [sixth] + bench]
-        result["changes_used"] = sum(1 for player_id in chosen if player_id not in set(held))
-        return result
+def _pick_lineup(records: list[dict], spend_cap: float, coach_points: float, held: list[str], changes: int):
+    """Ten players inside spend_cap. Coach points only break ties in slotting."""
+    requested = int(changes)
+    if held and requested < 10:
+        outcome = _search_changes(records, held, requested, spend_cap, coach_points)
+        if outcome[0] == "squad":
+            _kind, _total, starters, sixth, bench, remain_ids = outcome
+            starters, sixth, bench = _tidy_slots(starters, sixth, bench)
+            starters, sixth, bench = _spend_leftover(starters, sixth, bench, records, spend_cap, set(held))
+            return ("squad", starters, sixth, bench, remain_ids)
+        return outcome
     by_position = {position: [player for player in records if player["position_group"] == position] for position in ROSTER}
     if spend_cap <= 0 or any(len(by_position[position]) < ROSTER[position] for position in ROSTER):
-        return _empty_result(coach, coach_points, coach_price, day, "Not enough priced players on this slate.")
+        return ("message", "Not enough priced players on this slate.")
 
     cheapest_by_pos = {}
     upgrades_by_pos = {}
@@ -598,7 +721,14 @@ def build_best_team(
     improve_pool = []
     for position, players in by_position.items():
         cheapest_by_pos[position] = sorted(players, key=lambda player: (player["price"], -player["projected"]))
-        starter_pool[position] = players[: STARTER_DEPTH[position]]
+        top = players[: STARTER_DEPTH[position]]
+        later = [
+            player
+            for player in players
+            if (player.get("turn") or "") in ("T2", "T3")
+            and player["player_id"] not in {item["player_id"] for item in top}
+        ][:4]
+        starter_pool[position] = top + later
         upgrades_by_pos[position] = players
         improve_pool.extend(players[:25])
         improve_pool.extend(_value_pool([player for player in players if _plays(player)], 15))
@@ -615,10 +745,77 @@ def build_best_team(
             starter_pool, cheapest_by_pos, upgrades_by_pos, spend_cap, coach_points, formations=FORMATIONS
         )
     if best is None:
-        return _empty_result(coach, coach_points, coach_price, day, "No squad fits the budget and roster rules on this slate.")
-    _total, starters, sixth, bench = best
-    starters, sixth, bench = _improve(starters, sixth, bench, improve_pool, spend_cap, coach_points)
+        return ("message", "No squad fits the budget and roster rules on this slate.")
+    _total, starters, sixth, bench = best[:4]
+    improved = _improve(starters, sixth, bench, improve_pool, spend_cap, coach_points)
+    days = _turn_days(records)
+    if _turns_ok([*improved[0], improved[1], *improved[2]], days):
+        starters, sixth, bench = improved
     starters, sixth, bench = _tidy_slots(starters, sixth, bench)
+    starters, sixth, bench = _spend_leftover(starters, sixth, bench, records, spend_cap, None)
+    if not _turns_ok([*starters, sixth, *bench], days):
+        return ("message", "No squad fits the T1 cap (at most six on the first tip day).")
+    return ("squad", starters, sixth, bench, None)
+
+
+def _coach_row(coaches, coach_frame, coach_id):
+    if not coach_id:
+        return None
+    ident = str(coach_id)
+    for source in (coaches, coach_frame):
+        if source is None or source.empty:
+            continue
+        match = source[source["coach_id"].astype(str) == ident]
+        if not match.empty:
+            return match.iloc[0]
+    return None
+
+
+def _coach_options(
+    coach_frame,
+    coaches,
+    coach_prices: dict | None,
+    coach_id,
+    coach_price: float,
+    lock_coach: bool = False,
+):
+    """Priced coaches when credits are given; lock_coach keeps one saved coach."""
+    frame = coach_frame if coach_frame is not None and not coach_frame.empty else coaches
+    priced = {
+        str(key): float(value)
+        for key, value in (coach_prices or {}).items()
+        if value is not None and not pd.isna(value) and float(value) > 0
+    }
+    if lock_coach and coach_id:
+        chosen = _coach_row(coaches, frame, coach_id)
+        if chosen is None:
+            return []
+        price = priced.get(str(coach_id), max(float(coach_price or 0), 0.0))
+        points = 0.0 if pd.isna(chosen.projected) else float(chosen.projected)
+        return [(chosen, price, points)]
+    if coach_prices is not None:
+        options = []
+        if frame is None or frame.empty:
+            return options
+        for row in frame.itertuples(index=False):
+            ident = str(row.coach_id)
+            if ident not in priced or pd.isna(row.projected):
+                continue
+            options.append((row, priced[ident], float(row.projected)))
+        return options
+    chosen = None
+    if coach_id and coaches is not None and not coaches.empty:
+        match = coaches[coaches["coach_id"].astype(str) == str(coach_id)]
+        if not match.empty:
+            chosen = match.iloc[0]
+    if chosen is None and frame is not None and not frame.empty and frame["projected"].notna().any():
+        chosen = frame.sort_values("projected", ascending=False).iloc[0]
+    if chosen is None or pd.isna(chosen.projected):
+        return []
+    return [(chosen, max(float(coach_price or 0), 0.0), float(chosen.projected))]
+
+
+def _finish_squad(starters, sixth, bench, held, coach, coach_points, coach_price, day, horizon):
     if held:
         starters, sixth, bench = _mark_kept(starters, sixth, bench, set(held))
     result = _present(
@@ -630,8 +827,89 @@ def build_best_team(
         horizon,
     )
     if held:
-        chosen = [player["player_id"] for player in starters + [sixth] + bench]
-        result["changes_used"] = sum(1 for player_id in chosen if player_id not in set(held))
+        held_set = {_pid(player_id) for player_id in held}
+        chosen_ids = [_pid(player["player_id"]) for player in starters + [sixth] + bench]
+        result["changes_used"] = sum(1 for player_id in chosen_ids if player_id not in held_set)
+    return result
+
+
+def build_best_team(
+    projections: pd.DataFrame,
+    coaches: pd.DataFrame,
+    coach_price: float = 0.0,
+    day: pd.Timestamp | None = None,
+    budget: float = 100.0,
+    horizon: int = 1,
+    changes: int = 10,
+    held_ids: list[str] | None = None,
+    coach_id: str | None = None,
+    coach_prices: dict | None = None,
+    lock_coach: bool = False,
+) -> dict:
+    """Pick 4 guards, 4 forwards, 2 centers and a priced coach for one slate."""
+    horizon = max(int(horizon or 1), 1)
+    projections, coaches = _apply_horizon(projections, coaches, horizon)
+    if horizon > 1:
+        day = None
+    coach_frame = coaches
+    if day is not None and coaches is not None and not coaches.empty and "game_date" in coaches.columns:
+        local = pd.to_datetime(coaches["game_date"], utc=True, errors="coerce").dt.tz_convert("Europe/Athens")
+        coach_frame = coaches[local.dt.normalize() == day]
+    options = _coach_options(
+        coach_frame, coaches, coach_prices, coach_id, coach_price, lock_coach=lock_coach
+    )
+    if projections is None or projections.empty or "price" not in projections.columns:
+        coach, price, points = (options[0] if options else (None, max(float(coach_price or 0), 0.0), 0.0))
+        return _empty_result(
+            coach,
+            points if coach is not None else 0.0,
+            price,
+            day,
+            "Published prices are not loaded, so a squad cannot be built.",
+            horizon,
+        )
+    records = _records(projections, day)
+    held = [_pid(player_id) for player_id in (held_ids or [])]
+    if coach_prices is not None and not options:
+        if lock_coach:
+            message = "The saved team has no coach, or that coach is not in the current roster."
+        else:
+            message = (
+                "Type coach credits first. Coaches without credits are skipped, "
+                "like players without a published price."
+            )
+        return _empty_result(None, 0.0, 0.0, day, message, horizon)
+    if not options:
+        options = [(None, max(float(coach_price or 0), 0.0), 0.0)]
+    by_cap: dict[float, tuple] = {}
+    best_pack = None
+    last_message = "No squad fits the budget and roster rules on this slate."
+    for chosen, price, points in sorted(options, key=lambda item: item[2], reverse=True):
+        spend_cap = budget - price
+        key = round(float(spend_cap), 1)
+        if key not in by_cap:
+            by_cap[key] = _pick_lineup(records, spend_cap, 0.0, held, changes)
+        pack = by_cap[key]
+        if pack[0] == "message":
+            last_message = pack[1]
+            continue
+        _kind, starters, sixth, bench, _remain = pack
+        total = _score(starters, sixth, bench, points)
+        if best_pack is None or total > best_pack[0]:
+            best_pack = (total, starters, sixth, bench, chosen, price, points)
+    if best_pack is None:
+        coach, price, points = options[0]
+        return _empty_result(
+            coach,
+            points if coach is not None else 0.0,
+            price,
+            day,
+            last_message,
+            horizon,
+        )
+    _total, starters, sixth, bench, coach, price, points = best_pack
+    result = _finish_squad(starters, sixth, bench, held, coach, points, price, day, horizon)
+    result["requested_changes"] = int(changes)
     return result
 
 
@@ -660,7 +938,7 @@ def _tidy_slots(starters: list[dict], sixth: dict, bench: list[dict]):
 def _mark_kept(starters, sixth, bench, held_ids: set[str]):
     def tag(player):
         tagged = dict(player)
-        tagged["kept"] = player["player_id"] in held_ids
+        tagged["kept"] = _pid(player["player_id"]) in {_pid(item) for item in held_ids}
         return tagged
 
     return [tag(player) for player in starters], tag(sixth), [tag(player) for player in bench]
@@ -694,6 +972,7 @@ def _present(best: dict, coach, coach_points: float, coach_price: float, day, ho
         "day": day,
         "horizon": horizon,
         "changes_used": None,
+        "requested_changes": None,
         "message": "",
     }
 
@@ -709,6 +988,7 @@ def _line(player: dict, slot: str, multiplier: float) -> dict:
         "home_away": player["home_away"],
         "expected_minutes": player.get("expected_minutes"),
         "tip_day": "" if player.get("game_day") is None else pd.Timestamp(player["game_day"]).strftime("%a"),
+        "turn": player.get("turn") or "",
         "price": player["price"],
         "projected": player["projected"],
         "points_per_credit": player["points_per_credit"],
@@ -717,6 +997,7 @@ def _line(player: dict, slot: str, multiplier: float) -> dict:
         "availability": player.get("availability") or "available",
         "status_label": player.get("status_label") or "Available",
         "injury_note": player.get("injury_note") or "",
+        "form_source": player.get("form_source") or "",
     }
 
 
@@ -735,5 +1016,6 @@ def _empty_result(coach, coach_points: float, coach_price: float, day, message: 
         "day": day,
         "horizon": horizon,
         "changes_used": None,
+        "requested_changes": None,
         "message": message,
     }

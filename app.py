@@ -13,10 +13,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.cache import cache_dir, load_cache, refresh_cache
+from src.credentials import credentials_path, example_path, fantasy_login
+from src.prices import ensure_prices, load_price_meta, price_cache_path
 from src.injuries import ensure_injuries, injury_cache_path
-from src.optimize import _apply_horizon, build_best_team, slate_days
-from src.prices import ensure_prices, price_cache_path
-from src.project import build_dashboard
+from src.optimize import _apply_horizon, _pid, build_best_team, slate_days
+from src.project import FORM_GAMES, build_dashboard
 from src.squad import (
     BUDGET,
     create_team,
@@ -77,25 +78,25 @@ STATUS_NOTE = (
 PLAYER_COLUMNS = [
     "**Player** — name on the active roster.",
     "**Team** — EuroLeague club.",
-    "**Pos** — G guard, F forward, or C center.",
+    "**Pos** — G guard, F forward, or C center from the Fantasy Challenge player list (the same slots as the official game). EuroLeague box-score Center/Forward is not used when the list has a slot.",
     "**Status** — Available when he is confirmed to play. Yellow means it is not confirmed: Expected, Questionable, Game-time, Doubtful, or Uncertain. Out means he will not play. Players missing from the injury report are Available.",
     "**Note** — the injury comment. Blank when the player is Available.",
     "**GP** — games behind the averages.",
     "**Min** — average minutes in those games.",
-    "**Exp min** — minutes expected next game: 60% of the last 5 games and 40% of the season. Projected is that time times PIR per minute, then the opponent, venue, and win bonus.",
+    "**Exp min** — average minutes in the games behind Form, plus extra time when a teammate just went Out or unconfirmed (60% to the same position, cap 38). That extra is skipped if he already missed games this season, so the bump is not applied twice. When he is Available again, extra minutes that are still in teammate averages are taken back. One game of 30 minutes is 30. Two games of 30 and 15 is 22.5. Last season is used only if he has no game yet. Projected is that time times fantasy per minute, then what the opponent allows to G, F, or C, then venue and win bonus.",
     "**Fpts/g** — fantasy points per game. A win is PIR plus 10%; a loss is PIR.",
     "**Last 5** — average fantasy points over the last five games.",
     "**Per 36** — fantasy points scaled to 36 minutes.",
     "**Volatility** — how much the fantasy score swings. A low number is steadier, so it is green.",
-    "**Price** — published Fantasy Challenge credits.",
-    "**Points per credit** — Projected divided by Price.",
-    "**Projected** — expected fantasy points for the next game: recent form, times the opponent factor, times the home or away split, times a 10% win bonus weighted by Win %.",
-    "**Floor** / **Ceiling** — low and high outcomes from the last eight games, adjusted only for the opponent.",
+    "**Price** — Fantasy Challenge credits. The public list can lag the official game after a round. Type current credits on Best team.",
+    "**Points per credit** — Fpts/g (the average of every game in the sample) divided by Price. One game of 10 is 10 per game. Two games of 10 and 30 is 20.",
+    "**Projected** — expected fantasy points for the next game: his Fpts/g times how much fantasy this opponent allows to all G, or all F, or all C in a game versus the league (one star C is the whole C pie, not cloned onto every center), times home or away, times a 10% win bonus weighted by Win %. A one-game matchup is pulled toward last season.",
+    "**Floor** / **Ceiling** — low and high outcomes from the last eight games, adjusted for the opponent, then scaled if Exp min rose because of a teammate injury.",
     "**Opponent** — next rival.",
     "**H/A** — Home or Away for that game.",
     "**Win %** — chance the club wins the next game.",
-    "**Opp factor** — fantasy points this rival allows to the position, divided by the league average. Above 1 is an easier matchup.",
-    "**Form** — where the baseline comes from: 2025-26, 2026-27, Blend until eight games this season, or Pos. avg when the player has no history.",
+    "**Opp factor** — this team's G/F/C game total versus the league game total, pulled toward last season until a few games are in. Above 1 is easier. Four centers share one C pie; they do not each get the starter's night.",
+    "**Form** — where the baseline comes from: 2025-26, 2026-27, or Pos. avg when the player has no history. After one game this season, Form is this season.",
 ]
 COACH_COLUMNS = [
     "**Coach** — the club's head coach. The same GP, Opponent, H/A, Win %, and Form titles apply.",
@@ -109,28 +110,31 @@ MATCHUP_COLUMNS = [
     "**Next opponent** — the club and whether the game is home or away.",
     "**Tip** — start time in Athens.",
     "**Win chance** — same idea as Win %.",
-    "**Opponent allows** — fantasy points this defense gives up to that position.",
-    "**League allows** — typical fantasy points allowed to that position.",
-    "**Factor** — Opponent allows divided by League allows. Above 1 is an easier matchup.",
+    "**L3 / L5 / L10 / ALL** — average fantasy this defense allowed to the whole G, F, or C group in a game this season (the pie). After 1 game they match. Factor uses ALL versus League, shrunk toward last season.",
+    "**League** — league average of those game pies at that position.",
+    "**Factor** — ALL divided by League, pulled toward last season. Used in Projected. Above 1 is an easier matchup.",
 ]
 BEST_COLUMNS = [
-    "**Season data** — Current season projects from this season's games only. Last season projects from last season's games only. Opponent, venue, and win chance come from the same season.",
     "**Slate** — the full next round, or only the clubs that play on the chosen day.",
-    "**Coach price** — credits for the coach. They are not on the published player list, so 0 leaves all 100 credits for players.",
+    "**Coach credits** — typed by you. Coaches are not on the published player list. Best team only considers coaches with credits, then picks the one that leaves the strongest ten players inside the remaining budget.",
     "**Projected round** — squad total after captain, sixth-man, and bench multipliers, plus the coach. With more than one round, this is the sum over that window.",
     "**Rounds** — how many upcoming rounds to plan for. Each round uses that game's opponent, venue, and win chance. Form stays at today's numbers.",
-    "**Changes** — shown after you press Use. Pick 1, 2, 3, or 4 players from the named team to replace, or All to rebuild the whole squad.",
-    "**Move** — Keep means the player stays from that team. New means a change was spent.",
+    "**Start best team** — runs the picker. Opening the page does not start it. After you save My team, press Start again; the old table is not shown.",
+    "**Changes** — 1, 2, 3, or 4 is how many new players come in from outside the saved team. The others stay. All builds a new squad. Press Start best team after you pick.",
+    "**Include coach in changes** — checked: Best team may pick a different priced coach. Unchecked: the coach from the selected saved team stays.",
+    "**Move** — Keep means the player is already on the selected saved team. New means they are not.",
     "**Credits** — the budget you type. Player prices plus the coach price must stay inside that number. The usual Fantasy Challenge budget is 100.",
     "**Formation (G-F-C)** — guards, forwards, and centers in the starting five. Legal shapes are 2-2-1, 1-2-2, 2-1-2, 1-3-1, and 3-1-1.",
     "**Status** — only Available players are chosen. Out and unconfirmed players are left out.",
     "**Note** — why a player on the left-out list is not confirmed.",
+    "**Coming in / Going out** — after the suggestion, compared with the Saved team you have selected. Coming in is new to that team. Going out is on that team and not in the suggestion, including a coach change.",
     "**Slot** — Captain counts double, Starter and Sixth count in full, Bench counts at half.",
-    "**Day** — tip day in Athens. One, two, or three days. Each day keeps someone, then the other spots follow the projections.",
-    "**Exp min** — minutes expected in each game of the window. The projection is that time times PIR per minute. Reserves need about 15.",
+    "**Day** — tip day in Athens. **Turn** is T1, T2, or T3. At most six of the ten can be T1 when a later day exists, so those players can replace a low T1 score. A one-day slate has only T1.",
+    "**Form** — 2026-27 if he has played this season, 2025-26 if not. Best team uses that same mix; there is no season button.",
+    "**Exp min** — minutes expected in each game of the window, including extra time when a teammate just went Out or unconfirmed (same games played as the club). Same position gets 60%. If he already missed games in the sample, those minutes are not added again. When he returns, teammate Exp min goes back toward normal. The projection is that time times fantasy per minute, then what the opponent allows to the position. Reserves need about 15.",
     "**Counted** — Projected times that slot multiplier.",
-    "**Projected** — expected fantasy points for the next game, before the slot multiplier.",
-    "**Price** and **Points per credit** — published credits, and Projected divided by that price.",
+    "**Projected** — expected fantasy points for the next game, before the slot multiplier. Matchup is that opponent's G/F/C game pie versus the league, not one starter's line times every player.",
+    "**Price** and **Points per credit** — published credits, and Fpts/g divided by that price.",
 ]
 SQUAD_COLUMNS = [
     "**Status** — Available, a yellow unconfirmed status, or Out. Best team will not use anyone who is not Available.",
@@ -138,7 +142,7 @@ SQUAD_COLUMNS = [
     "**Slot** — starter, sixth, or bench. Five starters, one sixth man, four bench.",
     "**Captain** — one starter. That player counts double.",
     "**Price** — published credits. It counts toward the 100-credit budget.",
-    "**Points per credit** — Projected divided by Price.",
+    "**Points per credit** — Fpts/g (the average of every game in the sample) divided by Price. One game of 10 is 10 per game. Two games of 10 and 30 is 20.",
     "**Projected** — expected fantasy points for the next game, before the slot multiplier.",
     "**Counted** — Projected times the slot multiplier.",
     "**Coach price** — typed by you. Coach credits are not on the published player list.",
@@ -415,7 +419,11 @@ def _stored_price(value):
 
 def _page_board(data) -> None:
     st.subheader("Player board")
-    st.caption("Next-game fantasy points for the active roster. Filter by club, position, venue, or minutes.")
+    st.caption(
+        "Next-game fantasy points for the active roster. Filter by club, position, venue, or minutes. "
+        "A player who has played this season uses this season only for minutes, points, Last 5, Exp min, floor, ceiling, and projection. Last season is used only when he has no game yet. "
+        "When a teammate is Out or unconfirmed, Available players on that club get extra Exp min (60% to the same position), but only if that teammate has not already missed games in this season's sample. When he is Available again, that extra is taken back. Min and Last 5 stay historical."
+    )
     _show_columns(PLAYER_COLUMNS + COACH_COLUMNS)
     filtered = _filter_board(data.projections)
     st.dataframe(_styled_board(filtered, data.projections), hide_index=True, width="stretch")
@@ -430,7 +438,10 @@ def _page_board(data) -> None:
 
 def _page_matchup(data) -> None:
     st.subheader("Matchup")
-    st.caption("One club’s next game, how soft the opponent is by position, and that club’s players.")
+    st.caption(
+        "One club’s next game. Opponent G/F/C allowed is the fantasy that whole position scored in a game "
+        "(this season). Factor is that pie versus the league, pulled toward last season while games are few."
+    )
     _show_columns(MATCHUP_COLUMNS + PLAYER_COLUMNS + COACH_COLUMNS)
     if data.defense.empty:
         st.info("No upcoming games are on the schedule yet.")
@@ -453,16 +464,21 @@ def _page_matchup(data) -> None:
     left.metric("Next opponent", f"{first['opponent_name']} ({first['home_away']})")
     middle.metric("Tip", date)
     right.metric("Win chance", f"{float(first['win_prob']):.0%}")
-    table = defense[["position_group", "opp_allowed", "league_allowed", "opp_factor"]].copy()
+    table = defense[
+        ["position_group", "l3", "l5", "l10", "opp_allowed", "league_allowed", "opp_factor"]
+    ].copy()
     numeric = table.copy()
-    table["opp_allowed"] = table["opp_allowed"].map(lambda value: _round(value, 1))
-    table["league_allowed"] = table["league_allowed"].map(lambda value: _round(value, 1))
+    for column in ("l3", "l5", "l10", "opp_allowed", "league_allowed"):
+        table[column] = table[column].map(lambda value: _round(value, 1))
     table["opp_factor"] = table["opp_factor"].map(lambda value: _round(value, 2))
     table = table.rename(
         columns={
             "position_group": "Pos",
-            "opp_allowed": "Opponent allows",
-            "league_allowed": "League allows",
+            "l3": "L3",
+            "l5": "L5",
+            "l10": "L10",
+            "opp_allowed": "ALL",
+            "league_allowed": "League",
             "opp_factor": "Factor",
         }
     )
@@ -471,10 +487,16 @@ def _page_matchup(data) -> None:
         table,
         numeric.rename(columns={"opp_allowed": "opp_allowed", "opp_factor": "opp_factor"}),
         defense_bands,
-        {"opp_allowed": "Opponent allows", "opp_factor": "Factor"},
+        {"opp_allowed": "ALL", "opp_factor": "Factor"},
     )
     st.dataframe(painted, hide_index=True, width="stretch")
-    st.caption("Factor above 1 means this opponent has allowed more fantasy points than a typical defense. " + COLOR_NOTE)
+    games = int(first["defense_games"]) if "defense_games" in first.index else 0
+    st.caption(
+        "Same idea as a game pie, not a starter cloned onto every player: ALL is total G, F, or C fantasy "
+        "allowed in a game this season. L3/L5/L10 are the last 3/5/10 games. Factor is ALL versus the league, "
+        f"shrunk toward last season ({games} games for this opponent). Four centers share the C pie. "
+        + COLOR_NOTE
+    )
     coach = _coaches_for(data.coaches, team_code)
     if not coach.empty:
         st.subheader("Coach")
@@ -710,6 +732,7 @@ def _with_player_status(players: pd.DataFrame, projections: pd.DataFrame) -> pd.
         ("status_label", "Available"),
         ("injury_note", ""),
         ("availability", "available"),
+        ("form_source", ""),
     ):
         if column not in lookup.columns:
             continue
@@ -726,7 +749,10 @@ def _with_player_status(players: pd.DataFrame, projections: pd.DataFrame) -> pd.
 def _best_view(frame: pd.DataFrame) -> pd.DataFrame:
     view = frame.copy()
     for column, digits in (("price", 1), ("projected", 1), ("points_per_credit", 2), ("counted", 1), ("expected_minutes", 1)):
-        view[column] = view[column].map(lambda value, digits=digits: _round(value, digits))
+        if column in view.columns:
+            view[column] = view[column].map(lambda value, digits=digits: _round(value, digits))
+    if "form_source" in view.columns:
+        view["form_source"] = view["form_source"].map(lambda value: FORM_LABELS.get(value, value) if value else "")
     rename = {
         "slot": "Slot",
         "player_name": "Player",
@@ -737,6 +763,8 @@ def _best_view(frame: pd.DataFrame) -> pd.DataFrame:
         "opponent_name": "Opponent",
         "home_away": "H/A",
         "tip_day": "Day",
+        "turn": "Turn",
+        "form_source": "Form",
         "expected_minutes": "Exp min",
         "price": "Price",
         "projected": "Projected",
@@ -750,54 +778,127 @@ def _best_view(frame: pd.DataFrame) -> pd.DataFrame:
     return view[list(rename)].rename(columns=rename)
 
 
+def _mark_moves(players: pd.DataFrame, saved_ids: list[str]) -> pd.DataFrame:
+    """Tag suggestion rows Keep or New against the selected saved team."""
+    frame = players.copy()
+    if frame.empty or "player_id" not in frame.columns:
+        return frame
+    held = {str(player_id) for player_id in saved_ids}
+    if not held:
+        if "move" in frame.columns:
+            frame = frame.drop(columns=["move"])
+        return frame
+    frame["move"] = frame["player_id"].astype(str).map(lambda player_id: "Keep" if player_id in held else "New")
+    return frame
+
+
+def _show_squad_diff(
+    team_name: str,
+    saved: dict,
+    chosen: pd.DataFrame,
+    projections: pd.DataFrame,
+    coaches: pd.DataFrame,
+    result: dict,
+) -> None:
+    """Who is new in the suggestion and who drops from the selected saved team."""
+    saved_ids = [_pid(entry.get("player_id")) for entry in saved.get("players", []) if entry.get("player_id")]
+    if not saved_ids and not saved.get("coach_id"):
+        return
+    chosen_ids = set() if chosen is None or chosen.empty else set(chosen["player_id"].map(_pid))
+    held = set(saved_ids)
+    coming = pd.DataFrame() if chosen is None or chosen.empty else chosen[~chosen["player_id"].map(_pid).isin(held)]
+    going = projections[projections["player_id"].map(_pid).isin(held)]
+    going = going[~going["player_id"].map(_pid).isin(chosen_ids)]
+    saved_coach = None if not saved.get("coach_id") else str(saved.get("coach_id"))
+    result_coach = None if not result.get("coach_id") else str(result.get("coach_id"))
+    coach_changed = bool(saved_coach or result_coach) and saved_coach != result_coach
+
+    st.subheader(f"Compared with {team_name}")
+    if coming.empty and going.empty and not coach_changed:
+        st.caption(f"The suggestion matches {team_name}.")
+        return
+
+    in_col, out_col = st.columns(2)
+    with in_col:
+        st.markdown("**Coming in**")
+        if coming.empty and not (coach_changed and result.get("coach_name")):
+            st.caption("Nobody new.")
+        else:
+            if not coming.empty:
+                st.dataframe(_best_view(coming), hide_index=True, width="stretch")
+            if coach_changed and result.get("coach_name"):
+                st.caption(
+                    f"Coach in: {result['coach_name']} ({result.get('coach_team') or ''}) "
+                    f"at {float(result.get('coach_price') or 0):.1f} credits."
+                )
+    with out_col:
+        st.markdown("**Going out**")
+        if going.empty and not (coach_changed and saved_coach):
+            st.caption("Nobody dropped.")
+        else:
+            if not going.empty:
+                going = going.sort_values("projected", ascending=False, na_position="last")
+                st.dataframe(_styled_board(going, projections), hide_index=True, width="stretch")
+            if coach_changed and saved_coach:
+                names = coaches[coaches["coach_id"].astype(str) == saved_coach] if coaches is not None and not coaches.empty else coaches
+                label = saved_coach
+                if names is not None and not names.empty:
+                    row = names.iloc[0]
+                    label = f"{row.coach_name} ({row.team_name})"
+                st.caption(f"Coach out: {label}.")
+    st.caption(
+        f"Coming in is not on {team_name}. Going out is on {team_name} and is not in this suggestion. "
+        "Press Use to rebuild from that team with a change limit."
+    )
+
+
+def _show_unavailable(projections: pd.DataFrame, day) -> None:
+    left_out = (
+        projections[projections["availability"] != "available"].copy()
+        if "availability" in projections.columns
+        else projections.iloc[0:0]
+    )
+    if day is not None and not left_out.empty and "game_date" in left_out.columns:
+        local = pd.to_datetime(left_out["game_date"], utc=True, errors="coerce").dt.tz_convert("Europe/Athens")
+        left_out = left_out[local.dt.normalize() == day]
+    st.subheader(f"Unavailable players ({len(left_out)})")
+    if left_out.empty:
+        st.caption("No out or unconfirmed players on this slate.")
+        return
+    left_out = left_out.sort_values("projected", ascending=False, na_position="last")
+    st.dataframe(_styled_board(left_out, projections), hide_index=True, width="stretch")
+    st.caption("These players are Out or not confirmed, so they are not used in the squad.")
+
+
 def _page_best(data) -> None:
     st.subheader("Best team")
     st.caption(
-        "Type the credits you have. The coach and the ten players are chosen inside that number, using published player prices. "
-        "Each round uses that opponent, home or away, and win chance. "
-        "Out and unconfirmed players are left out. "
+        "Type the credits you have. Ten players are chosen from published prices, and the coach is chosen the same way among coaches with typed credits. "
+        "Select a saved team to see who would come in and who would go out after the suggestion. "
+        "Each round's projection already includes that opponent, home or away, and win chance (the same matchup used on Matchup). Opponent G/F/C is the game pie versus the league, not one star cloned onto every player. "
+        "A player who has played this season is scored from this season only. Last season is used only when he has no game yet. "
+        "Out and unconfirmed players are left out. If someone just went out (same games played as his club), his minutes go to remaining Available teammates (60% same position). If he already missed games in the sample, those averages already include the extra time, so it is not added again. When he returns, teammate minutes go back toward normal. "
         "The bench is players expected to play at least 15 minutes, with one center kept off the starting five. "
-        "Credits left after the starters go to the bench player who adds the most points. "
-        "Each tip day keeps a player when someone with minutes is available. The other spots are not split in half."
+        "Credits left after the starters are spent on a same-position upgrade so unused budget stays small. "
+        "Each tip day keeps a player when someone with minutes is available. "
+        "At most six of the ten play on T1 (the first tip day) so T2 and T3 players are there to replace a low T1 score after that day. "
+        "Pick the saved team, changes, and credits, then press Start best team. Opening this page does not start the picker."
     )
     _show_columns(BEST_COLUMNS + COACH_COLUMNS)
-    season_label = st.radio(
-        "Season data",
-        ["Current season", "Last season"],
-        index=0,
-        horizontal=True,
-        key="best_season",
-        help="Current season uses only this season's games. Players with no game yet are left out. "
-        "Last season uses only last season's games.",
-    )
-    season = data.current_season if season_label == "Current season" else data.prior_season
-    blended = data
-    data = _load_dashboard(_cache_token(), season)[0]
-    played = data.projections["projected"].notna().sum()
-    st.caption(f"{season_label} ({season}): {int(played)} players have a projection.")
     book = load_book(ROOT)
     names = list(book["teams"])
-    team_name = st.selectbox(
-        "Saved team",
-        names,
-        index=names.index(book["active"]),
-        key="best_saved_team",
-    )
-    use_saved = bool(st.session_state.get("best_use_saved"))
-    action_col, clear_col = st.columns(2)
-    with action_col:
-        if st.button(f"Use {team_name}", key="use_saved_team"):
-            st.session_state["best_use_saved"] = True
-            st.rerun()
-    with clear_col:
-        if use_saved and st.button("Build a new squad", key="ignore_saved_team"):
-            st.session_state["best_use_saved"] = False
-            st.rerun()
+    active = book["active"] if book["active"] in names else names[0]
+    if st.session_state.get("_best_follow_active") != active:
+        st.session_state["best_saved_team"] = active
+        st.session_state["_best_follow_active"] = active
+    if st.session_state.get("best_saved_team") not in names:
+        st.session_state["best_saved_team"] = active
+    team_name = st.selectbox("Saved team", names, key="best_saved_team")
     days = slate_days(data.projections)
     options = {"Full next round": None}
     for day in days:
         options[day.strftime("%a %d %b")] = day
-    budget_col, round_col, coach_col, credit_col = st.columns(4)
+    budget_col, round_col = st.columns(2)
     with budget_col:
         squad_budget = st.number_input(
             "Credits",
@@ -811,40 +912,76 @@ def _page_best(data) -> None:
     with round_col:
         horizon = st.selectbox("Rounds", [1, 2, 3, 4, 5], index=0, key="best_rounds")
     credits = load_credits(ROOT)
-    coach_rows = data.coaches.sort_values("projected", ascending=False, na_position="last")
-    coach_labels = {
-        f"{row.coach_name} ({row.team_name})": str(row.coach_id)
-        for row in coach_rows.itertuples(index=False)
-    }
-    with coach_col:
-        coach_label = st.selectbox("Coach", list(coach_labels) or ["No coach"], key="best_coach_pick")
-    coach_id = coach_labels.get(coach_label)
-    stored_coach_price = (credits.get("coaches") or {}).get(str(coach_id or ""))
-    with credit_col:
-        coach_price = st.number_input(
-            "Coach credits",
-            min_value=0.0,
-            max_value=40.0,
-            value=float(stored_coach_price or 0.0),
-            step=0.5,
-            key=f"best_coach_credits_{coach_id}",
-        )
-    if coach_id and float(coach_price) != float(stored_coach_price or 0.0):
-        credits.setdefault("coaches", {})[str(coach_id)] = float(coach_price)
-        save_credits(ROOT, credits)
-    if use_saved:
-        change_label = st.radio(
-            "Changes",
-            ["1", "2", "3", "4", "All"],
-            index=1,
-            horizontal=True,
-            key="best_change_pick",
-        )
-        changes = 10 if change_label == "All" else int(change_label)
-    else:
-        changes = 10
     saved = book["teams"][team_name]
-    held_ids = [str(entry.get("player_id")) for entry in saved.get("players", []) if entry.get("player_id")] if use_saved else []
+    coach_prices = {str(key): float(value) for key, value in (credits.get("coaches") or {}).items() if float(value) > 0}
+    saved_coach_id = saved.get("coach_id")
+    saved_coach_price = saved.get("coach_price")
+    if saved_coach_id and saved_coach_price and float(saved_coach_price) > 0:
+        coach_prices.setdefault(str(saved_coach_id), float(saved_coach_price))
+    coach_rows = data.coaches.sort_values("projected", ascending=False, na_position="last").copy()
+    if coach_rows.empty:
+        st.caption("No coaches on this slate.")
+    else:
+        editor = pd.DataFrame(
+            {
+                "coach_id": coach_rows["coach_id"].astype(str),
+                "Coach": coach_rows["coach_name"],
+                "Team": coach_rows["team_name"],
+                "Projected": coach_rows["projected"].map(lambda value: None if pd.isna(value) else round(float(value), 1)),
+                "Credits": coach_rows["coach_id"].astype(str).map(lambda ident: coach_prices.get(ident, 0.0)),
+            }
+        ).set_index("coach_id")
+        with st.expander("Coach credits", expanded=not coach_prices):
+            st.caption(
+                "Type each coach's credits. Best team skips anyone at 0, then picks the coach the same way it picks players: "
+                "the combination that scores most inside the remaining budget."
+            )
+            edited = st.data_editor(
+                editor,
+                width="stretch",
+                disabled=["Coach", "Team", "Projected"],
+                column_config={
+                    "Credits": st.column_config.NumberColumn(min_value=0.0, max_value=40.0, step=0.5, format="%.1f"),
+                },
+                key="best_coach_credits",
+            )
+            typed = {}
+            for ident, row in edited.iterrows():
+                value = float(row["Credits"] or 0)
+                if value > 0:
+                    typed[str(ident)] = value
+            stored = {
+                str(key): round(float(value), 1)
+                for key, value in (credits.get("coaches") or {}).items()
+                if float(value) > 0
+            }
+            rounded = {key: round(float(value), 1) for key, value in typed.items()}
+            if rounded != stored:
+                credits["coaches"] = typed
+                save_credits(ROOT, credits)
+            coach_prices = dict(typed)
+            if saved_coach_id and saved_coach_price and float(saved_coach_price) > 0:
+                coach_prices.setdefault(str(saved_coach_id), float(saved_coach_price))
+    change_label = st.radio(
+        "Changes",
+        ["1", "2", "3", "4", "All"],
+        index=1,
+        horizontal=True,
+        key="best_change_pick",
+    )
+    changes = 10 if change_label == "All" else int(change_label)
+    include_coach = st.checkbox(
+        "Include coach in changes",
+        value=False,
+        key="best_change_coach",
+        help="Checked: Best team may replace the coach, among those with typed credits. "
+        "Unchecked: keep the coach from the selected saved team.",
+        disabled=not bool(saved_coach_id),
+    )
+    lock_coach = bool(saved_coach_id) and not include_coach
+    saved_ids = [_pid(entry.get("player_id")) for entry in saved.get("players", []) if entry.get("player_id")]
+    use_saved = int(changes) < 10 and bool(saved_ids)
+    held_ids = saved_ids if use_saved else []
     day = None
     if int(horizon) == 1:
         choice = st.selectbox("Slate", list(options), key="best_slate")
@@ -852,34 +989,22 @@ def _page_best(data) -> None:
     else:
         choice = f"{int(horizon)} rounds"
         st.caption("The day filter applies to one round. A longer window uses every club's next games.")
-    if not use_saved:
-        st.caption(f"This builds a new squad. Press Use {team_name} to start from that saved team.")
-    elif not held_ids:
-        st.caption(f"{team_name} has no players, so the squad is still built from scratch.")
+    if changes >= 10:
+        st.caption(f"All: a new squad. Coming in and Going out are still compared with {team_name}.")
+    elif not saved_ids:
+        st.caption(f"{team_name} has no players, so All is used and the squad is built from scratch.")
     else:
-        limit = "any number" if changes >= 10 else f"at most {int(changes)}"
-        st.caption(f"Using {team_name}: {len(held_ids)} players, and {limit} can be replaced.")
+        st.caption(f"From {team_name}: keep {10 - int(changes)} players, bring in {int(changes)} new.")
+    if lock_coach:
+        st.caption(f"The coach from {team_name} stays. Check Include coach in changes to let Best team pick another.")
+    elif include_coach:
+        st.caption("The coach is included in the update: Best team picks among coaches with typed credits.")
+    st.markdown(
+        "<style>.st-key-start_best_team button {background-color:#2e7d32 !important;border-color:#2e7d32 !important;color:#ffffff !important;}</style>",
+        unsafe_allow_html=True,
+    )
+    started = st.button("Start best team", type="primary", key="start_best_team")
     projections = data.projections
-    if held_ids:
-        ids = projections["player_id"].astype(str)
-        known = set(ids[projections["projected"].notna()])
-        other = blended.projections
-        other_ids = other["player_id"].astype(str)
-        fill = [
-            player_id
-            for player_id in held_ids
-            if player_id not in known and player_id in set(other_ids[other["projected"].notna()])
-        ]
-        if fill:
-            projections = pd.concat(
-                [projections[~ids.isin(fill)], other[other_ids.isin(fill)]],
-                ignore_index=True,
-            )
-            who = ", ".join(other.loc[other_ids.isin(fill), "player_name"].astype(str))
-            st.caption(
-                f"No {season_label.lower()} games yet for {who}. "
-                "Their projection uses both seasons so they can stay in your squad."
-            )
     fingerprint = (
         choice,
         int(horizon),
@@ -887,11 +1012,13 @@ def _page_best(data) -> None:
         team_name,
         int(changes),
         tuple(sorted(held_ids)),
+        tuple(sorted(saved_ids)),
         round(float(squad_budget), 1),
-        round(float(coach_price), 1),
-        str(coach_id),
-        "bench-upgrade",
-        season,
+        tuple(sorted((key, round(float(value), 1)) for key, value in coach_prices.items())),
+        bool(include_coach),
+        bool(lock_coach),
+        str(saved_coach_id or ""),
+        "start-button",
         len(projections),
         round(float(pd.to_numeric(projections["projected"], errors="coerce").sum()), 1),
         tuple(
@@ -905,56 +1032,71 @@ def _page_best(data) -> None:
         if "availability" in projections.columns
         else (),
     )
-    cached = st.session_state.get("best_result") or {}
-    cached_players = cached.get("players")
-    missing_status = cached_players is None or "status_label" not in cached_players.columns
-    if st.session_state.get("best_key") != fingerprint or missing_status:
+    if started:
         with st.spinner("Building the best squad..."):
             st.session_state["best_result"] = build_best_team(
                 projections,
                 data.coaches,
-                coach_price=float(coach_price),
                 budget=float(squad_budget),
                 day=day,
                 horizon=int(horizon),
                 changes=int(changes),
                 held_ids=held_ids,
-                coach_id=coach_id,
+                coach_id=str(saved_coach_id) if lock_coach else None,
+                coach_price=float(saved_coach_price or 0) if lock_coach else 0.0,
+                coach_prices=coach_prices,
+                lock_coach=lock_coach,
             )
         st.session_state["best_key"] = fingerprint
-    result = st.session_state["best_result"]
-    if result["message"]:
-        st.warning(result["message"])
+    result = st.session_state.get("best_result")
+    if not result:
+        st.caption("Pick the saved team, changes, credits, and slate, then press Start best team.")
         return
-    players = _with_player_status(result["players"], projections)
+    if st.session_state.get("best_key") != fingerprint:
+        st.caption(
+            "The saved team or settings changed. The last suggestion is hidden so it is not mixed with the new lineup. "
+            "Press Start best team to rebuild."
+        )
+        return
+    players_frame = result.get("players")
+    if result.get("message"):
+        st.warning(result["message"])
+        if players_frame is None or getattr(players_frame, "empty", True):
+            return
+    players = _mark_moves(_with_player_status(result["players"], projections), saved_ids)
+    coach_price = float(result.get("coach_price") or 0)
     summary = st.columns(4)
     window = int(result.get("horizon") or 1)
     summary[0].metric("Projected round" if window == 1 else f"Projected {window} rounds", f"{result['total']:.1f}")
     summary[1].metric("Credits", f"{result['price_sum']:.1f} / {float(squad_budget):.1f}")
-    player_credits = float(result["price_sum"]) - float(coach_price or 0)
+    player_credits = float(result["price_sum"]) - coach_price
     st.caption(
-        f"Players {player_credits:.1f} + coach {float(coach_price):.1f} = {result['price_sum']:.1f} of {float(squad_budget):.1f}."
+        f"Players {player_credits:.1f} + coach {coach_price:.1f} = {result['price_sum']:.1f} of {float(squad_budget):.1f}."
     )
-    if float(coach_price) <= 0:
-        st.warning(
-            "Enter the coach's current credits. They come out of the Credits field, so a squad built at 0 will not fit once the coach is priced."
-        )
     starters = players[players["slot"].isin(["Captain", "Starter"])]
     shape = "-".join(str(int((starters["position_group"] == position).sum())) for position in POSITIONS)
     summary[2].metric("Formation (G-F-C)", shape)
     used = result.get("changes_used")
     summary[3].metric("Changes used", "—" if used is None else str(used))
+    if use_saved and used is not None and int(changes) < 10 and int(used) > int(changes):
+        st.caption(
+            f"No legal squad stayed inside {int(changes)} changes "
+            "(Out or unconfirmed players on the saved team still have to be replaced). "
+            f"This squad uses {int(used)}."
+        )
     if result["coach_name"]:
         venue = result["coach_home_away"] or ""
         opponent = result["coach_opponent"] or "the opponent"
         if window == 1:
+            coach_label = "Best coach" if include_coach or not lock_coach else "Coach"
             coach_text = (
-                f"Coach {result['coach_name']} ({result['coach_team']}) vs {opponent} ({venue}): "
+                f"{coach_label} {result['coach_name']} ({result['coach_team']}) vs {opponent} ({venue}): "
                 f"{result['coach_points']:.1f} projected points."
             )
         else:
+            coach_label = "Best coach" if include_coach or not lock_coach else "Coach"
             coach_text = (
-                f"Coach {result['coach_name']} ({result['coach_team']}) over {window} rounds: "
+                f"{coach_label} {result['coach_name']} ({result['coach_team']}) over {window} rounds: "
                 f"{result['coach_points']:.1f} projected points. Next game vs {opponent} ({venue})."
             )
         st.write(coach_text)
@@ -987,17 +1129,16 @@ def _page_best(data) -> None:
         hide_index=True,
         width="stretch",
     )
-    left_out = data.projections[data.projections["availability"] != "available"].copy() if "availability" in data.projections.columns else data.projections.iloc[0:0]
-    if day is not None and not left_out.empty and "game_date" in left_out.columns:
-        local = pd.to_datetime(left_out["game_date"], utc=True, errors="coerce").dt.tz_convert("Europe/Athens")
-        left_out = left_out[local.dt.normalize() == day]
-    with st.expander(f"Players left out ({len(left_out)})"):
-        if left_out.empty:
-            st.caption("No out or unconfirmed players on this slate.")
-        else:
-            left_out = left_out.sort_values("projected", ascending=False, na_position="last")
-            st.dataframe(_styled_board(left_out, data.projections), hide_index=True, width="stretch")
-            st.caption("These players are Out or not confirmed, so they are not used in the squad.")
+    if "turn" in players.columns and players["turn"].astype(str).str.len().gt(0).any():
+        counts = players["turn"].fillna("").value_counts()
+        parts = [f"{counts.get(label, 0)} {label}" for label in ("T1", "T2", "T3") if counts.get(label, 0)]
+        if parts:
+            extra = ""
+            if int(counts.get("T1", 0)) > 0 and (int(counts.get("T2", 0)) + int(counts.get("T3", 0))) > 0:
+                extra = " T2/T3 can replace a low T1 score after that day."
+            st.caption("Turns: " + ", ".join(parts) + "." + extra)
+    _show_squad_diff(team_name, saved, players, projections, data.coaches, result)
+    _show_unavailable(data.projections, day)
     st.subheader("Copy to My team")
     copy_col, name_col = st.columns(2)
     with copy_col:
@@ -1023,7 +1164,7 @@ def _page_best(data) -> None:
             {
                 "players": copied_players,
                 "coach_id": result.get("coach_id"),
-                "coach_price": _stored_price(coach_price),
+                "coach_price": _stored_price(result.get("coach_price")),
             },
         )
         st.success(f"Copied into {destination}. Open My team to see it.")
@@ -1037,7 +1178,7 @@ def _cache_token() -> tuple[float, ...]:
         price_cache_path(ROOT),
         injury_cache_path(ROOT),
     ]
-    return tuple(path.stat().st_mtime if path.exists() else 0.0 for path in paths)
+    return tuple(path.stat().st_mtime if path.exists() else 0.0 for path in paths) + (float(FORM_GAMES), 13.0)
 
 
 @st.cache_data(show_spinner=False)
@@ -1073,7 +1214,7 @@ def main() -> None:
     st.title("Euroleague Fantasy")
     st.caption(
         "Personal dashboard for the EuroLeague Fantasy Challenge. "
-        "Stats come from the public Euroleague feeds. Player credits come from the published Fantasy Challenge list."
+        "Stats come from the public Euroleague feeds. Player credits come from your Fantasy Challenge login when configured, otherwise the public list."
     )
     page = st.sidebar.radio("Page", ["Player board", "Matchup", "Best team", "My team"], key="page")
     if st.sidebar.button("Refresh data", key="refresh"):
@@ -1105,6 +1246,22 @@ def main() -> None:
     st.sidebar.write(f"Season {data.current_season}, history {data.prior_season}")
     priced = int(data.projections["price"].notna().sum()) if "price" in data.projections else 0
     st.sidebar.write(f"Prices loaded: {priced}")
+    meta = load_price_meta(ROOT)
+    if meta.get("source") == "official":
+        st.sidebar.caption("Credits are the official Fantasy Challenge quotations from your local login.")
+    elif fantasy_login(ROOT):
+        official_error = str(meta.get("official_error") or "").strip()
+        if official_error:
+            st.sidebar.warning(official_error)
+        else:
+            st.sidebar.warning(
+                "Official login is configured, but the last successful price file was the public list. Press Refresh data."
+            )
+    else:
+        st.sidebar.caption(
+            f"Credits are the public givemestats list. Copy {example_path(ROOT).name} to "
+            f"{credentials_path(ROOT).name} and add your EuroLeague Fan ID email and password, then Refresh data."
+        )
     if "availability" in data.projections.columns:
         out = int((data.projections["availability"] == "out").sum())
         unsure = int((data.projections["availability"] == "uncertain").sum())

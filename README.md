@@ -1,29 +1,87 @@
 # Euroleague Fantasy
 
-Personal dashboard for the EuroLeague Fantasy Challenge. It is local only: no accounts and no public site.
+Personal dashboard for the EuroLeague Fantasy Challenge. No accounts. Use it on this PC (`localhost`) or on your home Wi‑Fi (the Network URL). It is not meant to be opened from the public internet.
 
 Open [http://localhost:8501](http://localhost:8501).
 
 ## Run
 
-```bash
-cd ~/euroleague-fantasy
-python3 -m pip install -r requirements.txt
-streamlit run app.py --server.port 8501
+Python 3.10 or newer is enough. Use a virtual environment so `streamlit` is on your PATH. Typing `streamlit` from a plain PowerShell window will fail if that environment is not active.
+
+### Windows (PowerShell)
+
+A bare `streamlit` command fails with `The term 'streamlit' is not recognized` unless the project venv is active. Streamlit lives in `.venv`, not on the system PATH.
+
+If `.venv` already exists, from the project folder run:
+
+```powershell
+cd F:\euroleaguefantasy
+.\.venv\Scripts\python.exe -m streamlit run app.py --server.port 8501
 ```
 
-Python 3.10 is enough. The first **Refresh data** in the sidebar downloads last season’s box scores and can take a few minutes. Later refreshes only fetch new games, the credit list, and the injury report.
+First-time setup (creates `.venv` and installs packages):
 
-Stop the app with Ctrl+C in that terminal.
+```powershell
+cd F:\euroleaguefantasy
+py -3 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m streamlit run app.py --server.port 8501
+```
+
+You can also activate the venv, then `python -m streamlit` works without the full path:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+python -m streamlit run app.py --server.port 8501
+```
+
+`python -m streamlit` is more reliable on Windows than a bare `streamlit` command. If `Activate.ps1` is blocked, skip activation and keep using `.\.venv\Scripts\python.exe`.
+
+### macOS / Linux
+
+```bash
+cd ~/euroleague-fantasy
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install -r requirements.txt
+python3 -m streamlit run app.py --server.port 8501
+```
+
+The first **Refresh data** in the sidebar downloads last season’s box scores and can take a few minutes. Later refreshes only fetch new games, the credit list, and the injury report.
+
+Open [http://localhost:8501](http://localhost:8501). On the same Wi‑Fi you can also use the Network URL (192.168.x).
+
+### Stop
+
+In the terminal where Streamlit is running, press **Ctrl+C**. Wait until the prompt comes back. Closing that terminal also stops the app.
+
+If the window is gone but the site still loads, something is still bound to port 8501. In PowerShell:
+
+```powershell
+Get-NetTCPConnection -LocalPort 8501 -State Listen | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }
+```
+
+### Restart
+
+Stop the app, then start it again with the same command as **Run** (from the project folder):
+
+```powershell
+cd F:\euroleaguefantasy
+.\.venv\Scripts\python.exe -m streamlit run app.py --server.port 8501
+```
+
+After a restart, open [http://localhost:8501](http://localhost:8501) and hard-refresh the browser (Ctrl+F5). On **Best team**, press **Start best team** again if you still see an old squad.
+
+You do not need to delete `data/cache` to pick up code changes. Sidebar **Refresh data** is only for new box scores, prices, and injuries.
 
 ## Pages
 
 - **Player board** — every player, with team, position, venue, minutes, and sort filters.
 - **Matchup** — one club’s next game and how many fantasy points that defense allows.
-- **Best team** — a legal squad for the next round, one tip day, or the next 1–5 rounds. **Use** starts from a named team and spends the change limit. **Copy this squad** writes that lineup into My team.
+- **Best team** — a legal squad for the next round, one tip day, or the next 1–5 rounds. **Start best team** runs from the selected saved team. After you save a new lineup on My team, press Start again; the old suggestion is not kept on screen. **Copy this squad** writes that lineup into My team.
 - **My team** — your own lineup, saved in `data/squad.json`.
 
-Roster rules: 4 guards, 4 forwards, 2 centers, and the credits you type on Best team (100 in Fantasy Challenge), at most 6 players from one club. Starters, the sixth man, and the coach count in full. The bench counts at half. One starter is captain and counts double. Starting shapes are 2-2-1, 1-2-2, 2-1-2, 1-3-1, and 3-1-1 (guards-forwards-centers).
+Roster rules: 4 guards, 4 forwards, 2 centers, and the credits you type on Best team (100 in Fantasy Challenge), at most 6 players from one club. Best team spends leftover credits on a same-position upgrade when that does not lose projected points. Starters, the sixth man, and the coach count in full. The bench counts at half. One starter is captain and counts double. Starting shapes are 2-2-1, 1-2-2, 2-1-2, 1-3-1, and 3-1-1 (guards-forwards-centers).
 
 ## Columns
 
@@ -31,7 +89,7 @@ Green is the top third of the league, yellow the middle, red the bottom. Volatil
 
 - **Player** — name on the active roster.
 - **Team** — EuroLeague club.
-- **Pos** — G guard, F forward, or C center.
+- **Pos** — G, F, or C from the Fantasy Challenge player list (same slots as the official game).
 - **Status** — Available when the player is confirmed to play. Yellow means it is not confirmed (Expected, Questionable, Game-time, Doubtful, or Uncertain). Out means he will not play. Anyone missing from the injury report is Available. Best team leaves out everyone who is not Available.
 - **Note** — the injury comment. Blank when the player is Available.
 - **GP** — games behind the averages.
@@ -42,14 +100,14 @@ Green is the top third of the league, yellow the middle, red the bottom. Volatil
 - **Volatility** — how much the fantasy score swings.
 - **Price** — published Fantasy Challenge credits.
 - **Points per credit** — Projected divided by Price.
-- **Projected** — expected fantasy points for the next game. Expected minutes (60% of the last 5 games, 40% of the season) times PIR per minute, then adjusted for the opponent, home or away, and a 10% win bonus weighted by the win chance. Until eight 2026–27 games are played, last season fills the gap.
-- **Floor** / **Ceiling** — low and high outcomes from the last eight games, adjusted only for the opponent.
+- **Projected** — expected fantasy points for the next game: Fpts/g times that opponent's G/F/C game pie versus the league (one star is the whole pie, not cloned onto every player; a one-game matchup is pulled toward last season), then home or away and a 10% win bonus weighted by win chance. After one game this season, Fpts/g is this season only.
+- **Floor** / **Ceiling** — low and high outcomes from the last eight games, adjusted for the opponent.
 - **Opponent** — next rival.
 - **H/A** — Home or Away.
 - **Win %** — chance the club wins the next game.
-- **Opp factor** — fantasy points the rival allows to this position, divided by the league average. Above 1 is an easier matchup.
-- **Form** — 2025-26, 2026-27, Blend, or Pos. avg.
-- **Opponent allows** / **League allows** / **Factor** — the matchup table. Factor is Opponent allows divided by League allows.
+- **Opp factor** — game pie versus the league, pulled toward last season until a few games are in. Above 1 is an easier matchup.
+- **Form** — 2026-27 if he has played this season, 2025-26 if not.
+- **L3 / L5 / L10 / ALL / League / Factor** — Matchup table. ALL is total G, F, or C fantasy allowed in a game. Factor is that versus the league, shrunk early in the season.
 - **Slot** — Captain (double), Starter or Sixth (full), or Bench (half).
 - **Counted** — Projected times the slot multiplier.
 - **Coach price** — typed by you. Coach credits are not on the published player list.
@@ -67,6 +125,23 @@ Each page includes the head coach. Coach fantasy points come from the final marg
 
 **Fpts/g** and **Last 5** are those scores. **Avg margin** is the average score difference. **Projected** is the chance-weighted score for the next game and counts in full. **Floor** and **Ceiling** come from the last eight games. **Form** No games means that coach has no EuroLeague results in the cache. Coach colors compare coaches with each other.
 
+## Official credits (required for live prices)
+
+The official Fantasy Challenge app updates player credits after each round. This dashboard can use those same numbers only after **you** add your own EuroLeague Fan ID on this PC.
+
+1. Copy `data/fantasy_credentials.example` to `data/fantasy_credentials.properties`.
+2. Put the email and password you use on [euroleaguebasketball.net](https://www.euroleaguebasketball.net/en/login/) (the same Fan ID as Fantasy Challenge).
+3. Save the file. Do not commit it. It is listed in `.gitignore`.
+4. Press **Refresh data** in the sidebar.
+
+Each user of this repo must create their own `data/fantasy_credentials.properties`. GitHub never gets that file, and neither does `data/fantasy_session.json` (the local session token).
+
+If the file is missing, Best team falls back to the public givemestats list, which can still show opening prices.
+
 ## Data
 
-Box scores, schedule, and rosters come from the public Euroleague feeds and are cached in `data/cache/`. Player credits come from the published 2026–27 Fantasy Challenge list and refresh when that cache is older than six hours. Injury status comes from the BasketNews EuroLeague injury report and uses the same six-hour cache.
+Box scores, schedule, and rosters come from the public Euroleague feeds and are cached in `data/cache/`.
+
+Player credits come from the official Fantasy Challenge list when `data/fantasy_credentials.properties` is filled in, and from the public [givemestats 2026/27 list](https://givemestats.com/euroleague/fantasy-basketball-risers/2026) otherwise. Refresh when that cache is older than six hours, or when you press **Refresh data**. Official prices move after each round, when the transfer window opens.
+
+Injury status comes from the BasketNews EuroLeague injury report and uses the same six-hour cache.

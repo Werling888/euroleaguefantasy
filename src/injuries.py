@@ -121,9 +121,236 @@ def ensure_injuries(root: Path, force: bool = False) -> pd.DataFrame:
     return frame
 
 
+SAME_POS_SHARE = 0.60
+OTHER_POS_SHARE = 0.40
+MINUTE_CAP = 38.0
+
+
 def eligible_to_play(availability: str | None) -> bool:
     """True only when the player is confirmed available."""
     return (availability or "available") == "available"
+
+
+def _as_games(value) -> int:
+    if value is None or pd.isna(value):
+        return 0
+    return int(value)
+
+
+def _as_minutes(value) -> float | None:
+    if value is None or pd.isna(value):
+        return None
+    return float(value)
+
+
+def _role_weight(minutes: float) -> float:
+    return max(minutes, 1.0)
+
+
+def _give_minutes(
+    share: float,
+    indexes: list[int],
+    extras: dict[int, float],
+    base: dict[int, float],
+) -> float:
+    """Split share among teammates who still have room under the minute cap."""
+    leftover = share
+    while leftover > 1e-9:
+        open_slots = []
+        weights = []
+        for idx in indexes:
+            room = MINUTE_CAP - (base[idx] + extras[idx])
+            if room <= 1e-9:
+                continue
+            open_slots.append((idx, room))
+            weights.append(_role_weight(base[idx]))
+        if not open_slots:
+            return leftover
+        total = sum(weights)
+        next_leftover = 0.0
+        moved = False
+        for (idx, room), weight in zip(open_slots, weights):
+            piece = leftover * (weight / total)
+            take = min(piece, room)
+            extras[idx] += take
+            next_leftover += piece - take
+            if take > 1e-12:
+                moved = True
+        leftover = next_leftover
+        if not moved:
+            break
+    return leftover
+
+
+def _take_minutes(
+    share: float,
+    indexes: list[int],
+    extras: dict[int, float],
+    base: dict[int, float],
+) -> float:
+    """Take share back from teammates, not below zero minutes."""
+    leftover = share
+    while leftover > 1e-9:
+        open_slots = []
+        weights = []
+        for idx in indexes:
+            current = base[idx] + extras[idx]
+            if current <= 1e-9:
+                continue
+            open_slots.append((idx, current))
+            weights.append(_role_weight(base[idx]))
+        if not open_slots:
+            return leftover
+        total = sum(weights)
+        next_leftover = 0.0
+        moved = False
+        for (idx, current), weight in zip(open_slots, weights):
+            piece = leftover * (weight / total)
+            take = min(piece, current)
+            extras[idx] -= take
+            next_leftover += piece - take
+            if take > 1e-12:
+                moved = True
+        leftover = next_leftover
+        if not moved:
+            break
+    return leftover
+
+
+def _split_by_position(
+    share: float,
+    position: str,
+    available: list[tuple[int, str]],
+    extras: dict[int, float],
+    base: dict[int, float],
+    give: bool,
+) -> None:
+    same = [idx for idx, pos in available if pos == position]
+    other = [idx for idx, pos in available if pos != position]
+    same_share = share * SAME_POS_SHARE
+    other_share = share * OTHER_POS_SHARE
+    if not same:
+        other_share += same_share
+        same_share = 0.0
+    if not other:
+        same_share += other_share
+        other_share = 0.0
+    move = _give_minutes if give else _take_minutes
+    move(same_share, same, extras, base)
+    move(other_share, other, extras, base)
+
+
+def apply_injury_minutes(players: pd.DataFrame) -> pd.DataFrame:
+    """Move minutes when someone is newly out, and put them back when he returns.
+
+    A listed Out or unconfirmed player with as many current-season games as the
+    club donates expected minutes (60% same position). If he already missed
+    games, teammate averages already include that time, so nothing is added.
+
+    When he is Available again with fewer games than the club, that extra is
+    still in teammate averages. Take it back in the same 60/40 split, scaled by
+    the share of club games he missed.
+    """
+    frame = players.copy()
+    frame["injury_boost_min"] = 0.0
+    if frame.empty or "availability" not in frame.columns:
+        return frame
+    extras = {int(idx): 0.0 for idx in frame.index}
+    for _, club in frame.groupby("team_code", dropna=False):
+        base: dict[int, float] = {}
+        donors: list[tuple[int, str, float, int]] = []
+        available: list[tuple[int, str]] = []
+        available_games: dict[int, int] = {}
+        club_games = 0
+        for row in club.itertuples():
+            minutes = _as_minutes(getattr(row, "expected_minutes", None))
+            if minutes is None:
+                continue
+            idx = int(row.Index)
+            position = str(getattr(row, "position_group", "") or "")
+            status = getattr(row, "availability", "available") or "available"
+            games = _as_games(getattr(row, "gp_current", 0))
+            if status == "available":
+                base[idx] = minutes
+                available.append((idx, position))
+                available_games[idx] = games
+                if games > club_games:
+                    club_games = games
+            else:
+                donors.append((idx, position, minutes, games))
+        if not available:
+            continue
+        for _, position, vacated, games in donors:
+            if games < club_games:
+                continue
+            _split_by_position(vacated, position, available, extras, base, give=True)
+        if club_games <= 0:
+            continue
+        for idx, position in available:
+            games = available_games[idx]
+            if games >= club_games:
+                continue
+            missed = (club_games - games) / club_games
+            vacated = base[idx] * missed
+            others = [(other, pos) for other, pos in available if other != idx]
+            if not others or vacated <= 1e-9:
+                continue
+            _split_by_position(vacated, position, others, extras, base, give=False)
+    boosts = []
+    expected = []
+    projected = []
+    floors = []
+    ceilings = []
+    schedules = []
+    has_schedule = "schedule" in frame.columns
+    for idx, row in frame.iterrows():
+        extra = extras.get(int(idx), 0.0)
+        boosts.append(extra)
+        old_min = _as_minutes(row.get("expected_minutes"))
+        if old_min is None:
+            expected.append(row.get("expected_minutes"))
+            projected.append(row.get("projected"))
+            floors.append(row.get("floor"))
+            ceilings.append(row.get("ceiling"))
+            if has_schedule:
+                schedules.append(row.get("schedule"))
+            continue
+        new_min = min(MINUTE_CAP, max(0.0, old_min + extra))
+        expected.append(new_min)
+        ratio = new_min / old_min if old_min > 0 else 1.0
+
+        def _scale(value):
+            if value is None or pd.isna(value):
+                return value
+            return float(value) * ratio
+
+        projected.append(_scale(row.get("projected")))
+        floors.append(_scale(row.get("floor")))
+        ceilings.append(_scale(row.get("ceiling")))
+        if has_schedule:
+            games = row.get("schedule")
+            if isinstance(games, list):
+                scaled = []
+                for game in games:
+                    if not isinstance(game, dict):
+                        scaled.append(game)
+                        continue
+                    copy = dict(game)
+                    copy["projected"] = _scale(copy.get("projected"))
+                    scaled.append(copy)
+                schedules.append(scaled)
+            else:
+                schedules.append(games)
+    frame["injury_boost_min"] = boosts
+    frame["expected_minutes"] = expected
+    frame["projected"] = projected
+    frame["floor"] = floors
+    frame["ceiling"] = ceilings
+    if has_schedule:
+        frame["schedule"] = schedules
+    from src.squad import fill_points_per_credit
+
+    return fill_points_per_credit(frame)
 
 
 def _candidate_indexes(injuries: pd.DataFrame) -> dict[str, list[int]]:
