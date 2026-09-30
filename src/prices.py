@@ -210,11 +210,32 @@ def ensure_prices(root: Path, force: bool = False) -> pd.DataFrame:
             raise
     path.parent.mkdir(parents=True, exist_ok=True)
     frame.to_parquet(path, index=False)
-    extra = {"players": int(len(frame))}
-    if official_error:
-        extra["official_error"] = official_error
-    _write_meta(root, source, extra)
+    # Official fetch already wrote meta (including coach count and team bank).
+    if source != "official":
+        player_count = (
+            int((frame["position_group"] != "Coach").sum())
+            if "position_group" in frame.columns
+            else int(len(frame))
+        )
+        extra = {"players": player_count}
+        if official_error:
+            extra["official_error"] = official_error
+        _write_meta(root, source, extra)
     return frame
+
+
+def player_price_rows(prices: pd.DataFrame) -> pd.DataFrame:
+    """Guards, forwards, and centers only (exclude Head Coach quotations)."""
+    if prices is None or prices.empty or "position_group" not in prices.columns:
+        return prices if prices is not None else pd.DataFrame()
+    return prices[prices["position_group"].isin({"G", "F", "C"})].copy()
+
+
+def coach_price_rows(prices: pd.DataFrame) -> pd.DataFrame:
+    """Official Head Coach quotations from the Fantasy Challenge list."""
+    if prices is None or prices.empty or "position_group" not in prices.columns:
+        return pd.DataFrame()
+    return prices[prices["position_group"] == "Coach"].copy()
 
 
 def _candidate_indexes(prices: pd.DataFrame) -> dict[str, list[int]]:
@@ -265,17 +286,33 @@ def _chosen_list_row(name: str, team_name: str, prices: pd.DataFrame, index: dic
     return None
 
 
+def map_coach_prices(coaches: pd.DataFrame, prices: pd.DataFrame) -> dict[str, float]:
+    """Match local coaches to official coach quotations by name and team."""
+    rows = coach_price_rows(prices)
+    if coaches is None or coaches.empty or rows.empty:
+        return {}
+    index = _candidate_indexes(rows)
+    mapped: dict[str, float] = {}
+    for row in coaches.itertuples(index=False):
+        chosen = _chosen_list_row(row.coach_name, row.team_name, rows, index)
+        if chosen is None:
+            continue
+        mapped[str(row.coach_id)] = float(chosen.price)
+    return mapped
+
+
 def assign_prices(players: pd.DataFrame, prices: pd.DataFrame) -> pd.DataFrame:
     """Attach a published credit price and points per credit to each player."""
     frame = players.copy()
     frame["price"] = pd.NA
-    if prices is None or prices.empty:
+    market = player_price_rows(prices)
+    if market is None or market.empty:
         frame["points_per_credit"] = pd.NA
         return frame
-    index = _candidate_indexes(prices)
+    index = _candidate_indexes(market)
     assigned = []
     for player in frame.itertuples(index=False):
-        chosen = _chosen_list_row(player.player_name, player.team_name, prices, index)
+        chosen = _chosen_list_row(player.player_name, player.team_name, market, index)
         assigned.append(None if chosen is None else float(chosen.price))
     frame["price"] = assigned
     from src.squad import fill_points_per_credit
@@ -285,17 +322,18 @@ def assign_prices(players: pd.DataFrame, prices: pd.DataFrame) -> pd.DataFrame:
 
 def apply_fantasy_positions(players: pd.DataFrame, prices: pd.DataFrame) -> pd.DataFrame:
     """Use Fantasy Challenge G/F/C from the official/public list, not EuroLeague Center/Forward."""
-    if players is None or players.empty or prices is None or prices.empty:
+    market = player_price_rows(prices)
+    if players is None or players.empty or market is None or market.empty:
         return players
-    if "position_group" not in prices.columns:
+    if "position_group" not in market.columns:
         return players
     name_col = "person_name" if "person_name" in players.columns else "player_name"
     team_col = "team_name"
     frame = players.copy()
-    index = _candidate_indexes(prices)
+    index = _candidate_indexes(market)
     mapped = []
     for row in frame.itertuples(index=False):
-        chosen = _chosen_list_row(getattr(row, name_col), getattr(row, team_col), prices, index)
+        chosen = _chosen_list_row(getattr(row, name_col), getattr(row, team_col), market, index)
         if chosen is not None:
             slot = chosen["position_group"] if "position_group" in chosen.index else None
             if slot in {"G", "F", "C"}:

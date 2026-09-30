@@ -231,8 +231,16 @@ def _number(value):
     return number
 
 
-def score_squad(squad: dict, projections: pd.DataFrame, coaches: pd.DataFrame) -> dict:
-    """Apply starter, sixth-man, bench, and captain multipliers."""
+def score_squad(
+    squad: dict,
+    projections: pd.DataFrame,
+    coaches: pd.DataFrame,
+    budget: float | None = None,
+) -> dict:
+    """Apply starter, sixth-man, bench, and captain multipliers.
+
+    `budget` is the allowed team value (Fantasy bank). Defaults to 100 when omitted.
+    """
     messages: list[str] = []
     by_player = {}
     if projections is not None and not projections.empty:
@@ -345,8 +353,9 @@ def score_squad(squad: dict, projections: pd.DataFrame, coaches: pd.DataFrame) -
     if coach_price is not None:
         prices.append(coach_price)
     price_sum = sum(prices) if prices else None
-    if price_sum is not None and price_sum > BUDGET:
-        messages.append(f"Entered prices sum to {price_sum:.1f}, over the {BUDGET:.0f} credit budget.")
+    limit = BUDGET if budget is None else float(budget)
+    if price_sum is not None and price_sum > limit + 1e-6:
+        messages.append(f"Entered prices sum to {price_sum:.1f}, over the {limit:.1f} credit budget.")
 
     return {
         "players": frame,
@@ -358,5 +367,6 @@ def score_squad(squad: dict, projections: pd.DataFrame, coaches: pd.DataFrame) -
         "coach_price": coach_price,
         "total": total,
         "price_sum": price_sum,
+        "budget": limit,
         "messages": messages,
     }
