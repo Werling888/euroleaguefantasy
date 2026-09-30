@@ -37,6 +37,10 @@ POSITIONS = {
     "center": "C",
     "centres": "C",
     "centers": "C",
+    "hc": "Coach",
+    "coach": "Coach",
+    "head coach": "Coach",
+    "head_coach": "Coach",
 }
 
 
@@ -358,8 +362,46 @@ def fetch_official_roster(root: Path, team_id: int, matchday_id: int | None = No
     }
 
 
+def fetch_official_team_bank(root: Path, team_id: int | None = None) -> dict:
+    """Full Fantasy Challenge bank for one Classic team (players + coach value)."""
+    token = _api_token(root)
+    teams = fetch_user_fantasy_teams(root)
+    if not teams:
+        raise RuntimeError("No Classic Fantasy Challenge teams were found for this Fan ID.")
+    chosen = None
+    if team_id is not None:
+        for team in teams:
+            if int(team["id"]) == int(team_id):
+                chosen = team
+                break
+        if chosen is None:
+            raise RuntimeError(f"Fantasy team {team_id} was not in this account.")
+    else:
+        chosen = teams[0]
+    _, current_matchday = _league_ids(token)
+    round_id = int(chosen.get("matchday_id") or current_matchday)
+    response = requests.get(
+        f"{FANTAKING}/fantasy-teams/{int(chosen['id'])}/matchdays/{round_id}",
+        timeout=30,
+        headers=_headers(token),
+    )
+    if not response.ok:
+        raise RuntimeError(f"Could not load Fantasy Challenge bank ({_api_message(response)}).")
+    payload = response.json() if response.content else {}
+    data = payload.get("data") if isinstance(payload, dict) and isinstance(payload.get("data"), dict) else payload
+    if not isinstance(data, dict) or data.get("credits") in (None, ""):
+        raise RuntimeError("Fantasy Challenge bank was missing from the API response.")
+    return {
+        "team_id": int(chosen["id"]),
+        "team_name": chosen.get("name"),
+        "matchday_id": round_id,
+        "credits": float(data["credits"]),
+        "total_plus": None if data.get("total_plus") in (None, "") else float(data["total_plus"]),
+    }
+
+
 def fetch_official_prices(root: Path) -> pd.DataFrame:
-    """Current official quotations for the logged-in Fantasy Challenge account."""
+    """Current official quotations for players and coaches on the logged-in account."""
     token = _api_token(root)
     list_id, matchday_id = _league_ids(token)
     items = _fetch_players(token, list_id, matchday_id)
@@ -368,7 +410,7 @@ def fetch_official_prices(root: Path) -> pd.DataFrame:
         if not isinstance(item, dict):
             continue
         group = _position_group(item.get("position"))
-        if group not in {"G", "F", "C"}:
+        if group not in {"G", "F", "C", "Coach"}:
             continue
         price = item.get("quotation")
         if price in (None, ""):
@@ -387,16 +429,26 @@ def fetch_official_prices(root: Path) -> pd.DataFrame:
                 "price_change": None,
             }
         )
-    if not rows:
+    if not any(row["position_group"] in {"G", "F", "C"} for row in rows):
         raise RuntimeError("Official list had no priced guards, forwards, or centers.")
     frame = pd.DataFrame(rows)
     meta = {
         "source": "official",
         "fetched_at": time.time(),
-        "players": int(len(frame)),
+        "players": int((frame["position_group"] != "Coach").sum()),
+        "coaches": int((frame["position_group"] == "Coach").sum()),
         "matchday_id": matchday_id,
         "players_list_id": list_id,
     }
+    try:
+        bank = fetch_official_team_bank(root)
+        meta["team_bank"] = bank["credits"]
+        meta["team_bank_name"] = bank.get("team_name")
+        meta["team_bank_id"] = bank.get("team_id")
+        if bank.get("total_plus") is not None:
+            meta["team_bank_plus"] = bank["total_plus"]
+    except Exception as exc:
+        meta["team_bank_error"] = str(exc)
     path = price_meta_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(meta, indent=2), encoding="utf-8")

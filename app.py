@@ -15,7 +15,7 @@ if str(ROOT) not in sys.path:
 from src.cache import cache_dir, load_cache, refresh_cache
 from src.credentials import credentials_path, example_path, fantasy_login
 from src.import_squad import import_official_squad
-from src.prices import ensure_prices, load_price_meta, price_cache_path
+from src.prices import ensure_prices, load_price_meta, map_coach_prices, price_cache_path
 from src.injuries import ensure_injuries, injury_cache_path
 from src.optimize import _apply_horizon, _pid, build_best_team, slate_days
 from src.project import FORM_GAMES, build_dashboard
@@ -117,14 +117,14 @@ MATCHUP_COLUMNS = [
 ]
 BEST_COLUMNS = [
     "**Slate** — the full next round, or only the clubs that play on the chosen day.",
-    "**Coach credits** — typed by you. Coaches are not on the published player list. Best team only considers coaches with credits, then picks the one that leaves the strongest ten players inside the remaining budget.",
+    "**Coach credits** — filled from the official Fantasy Challenge list when your Fan ID is configured. You can still edit them. Best team only considers coaches with credits, then picks the one that leaves the strongest ten players inside the remaining budget.",
     "**Projected round** — squad total after captain, sixth-man, and bench multipliers, plus the coach. With more than one round, this is the sum over that window.",
     "**Rounds** — how many upcoming rounds to plan for. Each round uses that game's opponent, venue, and win chance. Form stays at today's numbers.",
     "**Start best team** — runs the picker. Opening the page does not start it. After you save My team, press Start again; the old table is not shown.",
     "**Changes** — 1, 2, 3, or 4 is how many new players come in from outside the saved team. The others stay. All builds a new squad. Press Start best team after you pick.",
     "**Include coach in changes** — checked: Best team may pick a different priced coach. Unchecked: the coach from the selected saved team stays.",
     "**Move** — Keep means the player is already on the selected saved team. New means they are not.",
-    "**Credits** — the budget you type. Player prices plus the coach price must stay inside that number. The usual Fantasy Challenge budget is 100.",
+    "**Credits** — squad budget, coach included. Prefills from your Fantasy Challenge bank when the official login is configured. Player prices plus the coach price must stay inside that number.",
     "**Formation (G-F-C)** — guards, forwards, and centers in the starting five. Legal shapes are 2-2-1, 1-2-2, 2-1-2, 1-3-1, and 3-1-1.",
     "**Status** — only Available players are chosen. Out and unconfirmed players are left out.",
     "**Note** — why a player on the left-out list is not confirmed.",
@@ -146,7 +146,7 @@ SQUAD_COLUMNS = [
     "**Points per credit** — Fpts/g (the average of every game in the sample) divided by Price. One game of 10 is 10 per game. Two games of 10 and 30 is 20.",
     "**Projected** — expected fantasy points for the next game, before the slot multiplier.",
     "**Counted** — Projected times the slot multiplier.",
-    "**Coach price** — typed by you. Coach credits are not on the published player list.",
+    "**Coach price** — from the official Fantasy Challenge list when credentials are configured.",
     "**Projected round** — lineup total plus the coach.",
 ]
 
@@ -666,6 +666,7 @@ def _page_squad(data) -> None:
     if not data.coaches.empty:
         for row in data.coaches.sort_values("coach_name").itertuples(index=False):
             coach_options[f"{row.coach_name} ({row.team_name})"] = row.coach_id
+    official_coach_prices = map_coach_prices(data.coaches, ensure_prices(ROOT))
     current_label = "No coach"
     for label, coach_id in coach_options.items():
         if coach_id == squad.get("coach_id"):
@@ -678,21 +679,45 @@ def _page_squad(data) -> None:
             index=list(coach_options).index(current_label),
             key=f"coach_choice_{active}",
         )
-        coach_price = st.number_input(
-            "Coach price",
-            min_value=0.0,
-            max_value=100.0,
-            value=squad.get("coach_price"),
-            step=0.5,
-            key=f"coach_price_{active}",
-        )
+        chosen_preview = coach_options[coach_label]
+        if chosen_preview and str(chosen_preview) in official_coach_prices:
+            st.caption(
+                f"Coach credits: {official_coach_prices[str(chosen_preview)]:.1f} "
+                "(from the official Fantasy Challenge list)."
+            )
+        elif chosen_preview:
+            st.caption("No official coach price loaded yet. Refresh data with your Fan ID configured.")
+        else:
+            st.caption("Coach credits come from the official Fantasy Challenge list.")
         if st.form_submit_button("Save coach"):
-            squad["coach_id"] = coach_options[coach_label]
-            squad["coach_price"] = _stored_price(coach_price)
+            chosen_id = coach_options[coach_label]
+            price = None
+            if chosen_id:
+                price = _stored_price(official_coach_prices.get(str(chosen_id)))
+                if price is None:
+                    st.warning(
+                        "That coach has no official price yet. Refresh data with your Fan ID, then save again."
+                    )
+                    return
+            squad["coach_id"] = chosen_id
+            squad["coach_price"] = price
             save_squad(ROOT, squad)
             st.rerun()
 
-    scored = score_squad(load_squad(ROOT), projections, data.coaches)
+    # Prefer live official coach quotation for scoring when the coach is set.
+    scoring_squad = dict(load_squad(ROOT))
+    coach_id = scoring_squad.get("coach_id")
+    if coach_id and str(coach_id) in official_coach_prices:
+        scoring_squad["coach_price"] = float(official_coach_prices[str(coach_id)])
+    price_meta = load_price_meta(ROOT)
+    bank_limit = BUDGET
+    raw_bank = price_meta.get("team_bank")
+    if raw_bank not in (None, ""):
+        try:
+            bank_limit = float(raw_bank)
+        except (TypeError, ValueError):
+            bank_limit = BUDGET
+    scored = score_squad(scoring_squad, projections, data.coaches, budget=bank_limit)
     counts = scored["counts"]
     slots = scored["slot_counts"]
     summary = st.columns(4)
@@ -703,14 +728,21 @@ def _page_squad(data) -> None:
         f"{slots.get('starter', 0)}/5 · {slots.get('sixth', 0)}/1 · {slots.get('bench', 0)}/4",
     )
     price_sum = scored["price_sum"]
-    summary[3].metric("Credits", "—" if price_sum is None else f"{price_sum:.1f} / {BUDGET:.0f}")
+    budget_limit = float(scored.get("budget") or bank_limit)
+    summary[3].metric(
+        "Credits",
+        "—" if price_sum is None else f"{price_sum:.1f} / {budget_limit:.1f}",
+    )
     coach = scored["coach"]
     if coach is not None and scored["coach_points"] is not None:
         coach_value = points_per_credit(scored["coach_points"], scored["coach_price"])
         value_text = "" if coach_value is None else f" Points per credit: {coach_value:.2f}."
+        price_text = ""
+        if scored.get("coach_price") is not None:
+            price_text = f" Credits {float(scored['coach_price']):.1f}."
         st.write(
             f"Coach {coach.coach_name} vs {coach.opponent_name} ({coach.home_away}): "
-            f"{scored['coach_points']:.1f} projected points.{value_text}"
+            f"{scored['coach_points']:.1f} projected points.{price_text}{value_text}"
         )
         detail = data.coaches[data.coaches["coach_id"] == coach.coach_id]
         if not detail.empty:
@@ -982,23 +1014,49 @@ def _page_best(data) -> None:
     for day in days:
         options[day.strftime("%a %d %b")] = day
     budget_col, round_col = st.columns(2)
+    price_meta = load_price_meta(ROOT)
+    bank_value = None
+    raw_bank = price_meta.get("team_bank")
+    if raw_bank not in (None, ""):
+        try:
+            bank_value = float(raw_bank)
+        except (TypeError, ValueError):
+            bank_value = None
+    default_budget = float(bank_value) if bank_value is not None else 100.0
+    if "best_budget" not in st.session_state:
+        st.session_state["best_budget"] = default_budget
+        if bank_value is not None:
+            st.session_state["_best_budget_token"] = f"bank:{round(bank_value, 1)}"
+    elif bank_value is not None:
+        bank_token = f"bank:{round(bank_value, 1)}"
+        if st.session_state.get("_best_budget_token") != bank_token:
+            st.session_state["best_budget"] = bank_value
+            st.session_state["_best_budget_token"] = bank_token
     with budget_col:
         squad_budget = st.number_input(
             "Credits",
             min_value=20.0,
             max_value=200.0,
-            value=100.0,
             step=0.5,
             key="best_budget",
-            help="The credits you have for the whole squad, coach included.",
+            help="Full squad budget including the coach. Prefills from your Fantasy Challenge bank when the official login is configured.",
         )
+        if bank_value is not None:
+            bank_name = price_meta.get("team_bank_name") or "Fantasy Challenge"
+            st.caption(f"Bank from {bank_name}: {bank_value:.1f} (players + coach).")
     with round_col:
         horizon = st.selectbox("Rounds", [1, 2, 3, 4, 5], index=0, key="best_rounds")
     credits = load_credits(ROOT)
     saved = book["teams"][team_name]
-    coach_prices = {str(key): float(value) for key, value in (credits.get("coaches") or {}).items() if float(value) > 0}
+    official_coach_prices = map_coach_prices(data.coaches, ensure_prices(ROOT))
+    coach_prices = {str(key): float(value) for key, value in official_coach_prices.items() if float(value) > 0}
+    for key, value in (credits.get("coaches") or {}).items():
+        if float(value) > 0:
+            coach_prices[str(key)] = float(value)
     saved_coach_id = saved.get("coach_id")
     saved_coach_price = saved.get("coach_price")
+    if saved_coach_id and (saved_coach_price in (None, "") or float(saved_coach_price or 0) <= 0):
+        saved_coach_price = coach_prices.get(str(saved_coach_id))
     if saved_coach_id and saved_coach_price and float(saved_coach_price) > 0:
         coach_prices.setdefault(str(saved_coach_id), float(saved_coach_price))
     coach_rows = data.coaches.sort_values("projected", ascending=False, na_position="last").copy()
@@ -1015,10 +1073,16 @@ def _page_best(data) -> None:
             }
         ).set_index("coach_id")
         with st.expander("Coach credits", expanded=not coach_prices):
-            st.caption(
-                "Type each coach's credits. Best team skips anyone at 0, then picks the coach the same way it picks players: "
-                "the combination that scores most inside the remaining budget."
-            )
+            if official_coach_prices:
+                st.caption(
+                    "Credits come from the official Fantasy Challenge list. Edit a row only to override. "
+                    "Best team skips anyone at 0, then picks the coach that leaves the strongest ten players inside the remaining budget."
+                )
+            else:
+                st.caption(
+                    "Type each coach's credits. Configure your Fan ID and Refresh data to load official coach prices. "
+                    "Best team skips anyone at 0, then picks the coach the same way it picks players."
+                )
             edited = st.data_editor(
                 editor,
                 width="stretch",
@@ -1033,14 +1097,25 @@ def _page_best(data) -> None:
                 value = float(row["Credits"] or 0)
                 if value > 0:
                     typed[str(ident)] = value
+            official_rounded = {
+                str(key): round(float(value), 1)
+                for key, value in official_coach_prices.items()
+                if float(value) > 0
+            }
+            rounded = {key: round(float(value), 1) for key, value in typed.items()}
+            # Persist only overrides that differ from the official list.
+            overrides = {
+                key: value
+                for key, value in rounded.items()
+                if official_rounded.get(key) != value
+            }
             stored = {
                 str(key): round(float(value), 1)
                 for key, value in (credits.get("coaches") or {}).items()
                 if float(value) > 0
             }
-            rounded = {key: round(float(value), 1) for key, value in typed.items()}
-            if rounded != stored:
-                credits["coaches"] = typed
+            if overrides != stored:
+                credits["coaches"] = overrides
                 save_credits(ROOT, credits)
             coach_prices = dict(typed)
             if saved_coach_id and saved_coach_price and float(saved_coach_price) > 0:
@@ -1331,7 +1406,12 @@ def main() -> None:
     st.sidebar.write(f"Prices loaded: {priced}")
     meta = load_price_meta(ROOT)
     if meta.get("source") == "official":
-        st.sidebar.caption("Credits are the official Fantasy Challenge quotations from your local login.")
+        parts = ["Credits are the official Fantasy Challenge quotations from your local login."]
+        if meta.get("coaches"):
+            parts.append(f"{int(meta['coaches'])} coaches priced.")
+        if meta.get("team_bank") not in (None, ""):
+            parts.append(f"Bank {float(meta['team_bank']):.1f}.")
+        st.sidebar.caption(" ".join(parts))
     elif fantasy_login(ROOT):
         official_error = str(meta.get("official_error") or "").strip()
         if official_error:

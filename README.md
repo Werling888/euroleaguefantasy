@@ -110,7 +110,7 @@ Green is the top third of the league, yellow the middle, red the bottom. Volatil
 - **L3 / L5 / L10 / ALL / League / Factor** — Matchup table. ALL is total G, F, or C fantasy allowed in a game. Factor is that versus the league, shrunk early in the season.
 - **Slot** — Captain (double), Starter or Sixth (full), or Bench (half).
 - **Counted** — Projected times the slot multiplier.
-- **Coach price** — typed by you. Coach credits are not on the published player list.
+- **Coach price** — from the official Fantasy Challenge list when credentials are configured.
 
 ## Coaches
 
@@ -127,7 +127,7 @@ Each page includes the head coach. Coach fantasy points come from the final marg
 
 ## Official credits (required for live prices)
 
-The official Fantasy Challenge app updates player credits after each round. This dashboard can use those same numbers only after **you** add your own EuroLeague Fan ID on this PC.
+The official Fantasy Challenge app updates player and coach credits after each round. This dashboard can use those same numbers only after **you** add your own EuroLeague Fan ID on this PC.
 
 1. Copy `data/fantasy_credentials.example` to `data/fantasy_credentials.properties`.
 2. Put the email and password you use on [euroleaguebasketball.net](https://www.euroleaguebasketball.net/en/login/) (the same Fan ID as Fantasy Challenge).
@@ -136,7 +136,9 @@ The official Fantasy Challenge app updates player credits after each round. This
 
 Each user of this repo must create their own `data/fantasy_credentials.properties`. GitHub never gets that file, and neither does `data/fantasy_session.json` (the local session token).
 
-If the file is missing, Best team falls back to the public givemestats list, which can still show opening prices.
+If the file is missing, Best team falls back to the public givemestats list for **players** only (opening prices). Coach credits and your Fantasy bank need the Fan ID login.
+
+After a successful official refresh, **Best team** prefills coach credits from the Fantasy list and the **Credits** budget from your Fantasy Challenge bank (players + coach value). You can still edit either.
 
 ## Data
 
