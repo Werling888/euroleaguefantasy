@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
 from src.cache import cache_dir, load_cache, refresh_cache
 from src.credentials import credentials_path, example_path, fantasy_login
 from src.import_squad import import_official_squad
+from src.official import change_radio_options, suggested_changes_label
 from src.prices import ensure_prices, load_price_meta, map_coach_prices, price_cache_path
 from src.injuries import ensure_injuries, injury_cache_path
 from src.optimize import _apply_horizon, _pid, build_best_team, slate_days
@@ -121,7 +122,7 @@ BEST_COLUMNS = [
     "**Projected round** — squad total after captain, sixth-man, and bench multipliers, plus the coach. With more than one round, this is the sum over that window.",
     "**Rounds** — how many upcoming rounds to plan for. Each round uses that game's opponent, venue, and win chance. Form stays at today's numbers.",
     "**Start best team** — runs the picker. Opening the page does not start it. After you save My team, press Start again; the old table is not shown.",
-    "**Changes** — 1, 2, 3, or 4 is how many new players come in from outside the saved team. The others stay. All builds a new squad. Press Start best team after you pick.",
+    "**Changes** — 1, 2, 3, or 4 is how many new players come in from outside the saved team. The others stay. All builds a new squad. Prefills from your official free trades left when Fan ID data is loaded. Press Start best team after you pick.",
     "**Include coach in changes** — checked: Best team may pick a different priced coach. Unchecked: the coach from the selected saved team stays.",
     "**Move** — Keep means the player is already on the selected saved team. New means they are not.",
     "**Credits** — squad budget, coach included. Prefills from your Fantasy Challenge bank when the official login is configured. Player prices plus the coach price must stay inside that number.",
@@ -1120,13 +1121,53 @@ def _page_best(data) -> None:
             coach_prices = dict(typed)
             if saved_coach_id and saved_coach_price and float(saved_coach_price) > 0:
                 coach_prices.setdefault(str(saved_coach_id), float(saved_coach_price))
+    free_trades = price_meta.get("free_trades")
+    max_trades = price_meta.get("max_trades")
+    try:
+        free_trades = None if free_trades in (None, "") else int(free_trades)
+    except (TypeError, ValueError):
+        free_trades = None
+    try:
+        max_trades = None if max_trades in (None, "") else int(max_trades)
+    except (TypeError, ValueError):
+        max_trades = None
+    suggested_changes = suggested_changes_label(free_trades)
+    change_options = change_radio_options(free_trades)
+    if suggested_changes is not None and suggested_changes not in change_options:
+        suggested_changes = change_options[0] if change_options else None
+    if suggested_changes is not None:
+        trades_token = f"trades:{suggested_changes}:{max_trades}:{','.join(change_options)}"
+        if "best_change_pick" not in st.session_state:
+            st.session_state["best_change_pick"] = suggested_changes
+            st.session_state["_best_change_token"] = trades_token
+        elif st.session_state.get("_best_change_token") != trades_token:
+            st.session_state["best_change_pick"] = suggested_changes
+            st.session_state["_best_change_token"] = trades_token
+    elif "best_change_pick" not in st.session_state:
+        st.session_state["best_change_pick"] = "2" if "2" in change_options else change_options[0]
+    if st.session_state.get("best_change_pick") not in change_options:
+        fallback = suggested_changes or ("2" if "2" in change_options else change_options[0])
+        st.session_state["best_change_pick"] = fallback
     change_label = st.radio(
         "Changes",
-        ["1", "2", "3", "4", "All"],
-        index=1,
+        change_options,
         horizontal=True,
         key="best_change_pick",
     )
+    if free_trades is not None:
+        cap = f" / {max_trades}" if max_trades is not None else ""
+        st.caption(
+            f"Official free trades left: {free_trades}{cap} "
+            f"(Fantasy Challenge account — not the local saved team)."
+        )
+        if free_trades <= 0:
+            st.caption("No free trades left on the official team; only All is offered for a full local rebuild.")
+        elif free_trades < 4:
+            hidden = [str(n) for n in range(free_trades + 1, 5)]
+            st.caption(
+                f"Hidden above your free trades: {', '.join(hidden)}. "
+                "All remains available for a full local rebuild."
+            )
     changes = 10 if change_label == "All" else int(change_label)
     include_coach = st.checkbox(
         "Include coach in changes",
@@ -1150,9 +1191,16 @@ def _page_best(data) -> None:
     if changes >= 10:
         st.caption(f"All: a new squad. Coming in and Going out are still compared with {team_name}.")
     elif not saved_ids:
-        st.caption(f"{team_name} has no players, so All is used and the squad is built from scratch.")
+        st.caption(
+            f"{team_name} has no players, so All is used and the squad is built from scratch. "
+            "Import or add a lineup on My team to use limited Changes."
+        )
     else:
         st.caption(f"From {team_name}: keep {10 - int(changes)} players, bring in {int(changes)} new.")
+        st.caption(
+            "Coming in / Going out compares to this local saved team. "
+            "Use Import on My team if you want it to match Fantasy Challenge."
+        )
     if lock_coach:
         st.caption(f"The coach from {team_name} stays. Check Include coach in changes to let Best team pick another.")
     elif include_coach:
@@ -1411,6 +1459,12 @@ def main() -> None:
             parts.append(f"{int(meta['coaches'])} coaches priced.")
         if meta.get("team_bank") not in (None, ""):
             parts.append(f"Bank {float(meta['team_bank']):.1f}.")
+        if meta.get("free_trades") not in (None, ""):
+            free = int(meta["free_trades"])
+            if meta.get("max_trades") not in (None, ""):
+                parts.append(f"Free trades {free}/{int(meta['max_trades'])}.")
+            else:
+                parts.append(f"Free trades {free}.")
         st.sidebar.caption(" ".join(parts))
     elif fantasy_login(ROOT):
         official_error = str(meta.get("official_error") or "").strip()
