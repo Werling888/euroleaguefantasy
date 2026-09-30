@@ -7,5 +7,6 @@ data/credit_overrides.json
 data/fantasy_credentials.properties
 data/fantasy_session.json
 graphify-out/
+.agents/
 .claude/settings.local.json
 scripts/.projection_baseline.pkl

@@ -79,7 +79,7 @@ You do not need to delete `data/cache` to pick up code changes. Sidebar **Refres
 - **Player board** — every player, with team, position, venue, minutes, and sort filters.
 - **Matchup** — one club’s next game and how many fantasy points that defense allows.
 - **Best team** — a legal squad for the next round, one tip day, or the next 1–5 rounds. **Start best team** runs from the selected saved team. After you save a new lineup on My team, press Start again; the old suggestion is not kept on screen. **Copy this squad** writes that lineup into My team.
-- **My team** — your own lineup, saved in `data/squad.json`.
+- **My team** — your own lineup, saved in `data/squad.json`. Optional **Import from Fantasy Challenge** pulls the official lineup for your Fan ID into the selected saved team (overwrite only when you confirm).
 
 Roster rules: 4 guards, 4 forwards, 2 centers, and the credits you type on Best team (100 in Fantasy Challenge), at most 6 players from one club. Best team spends leftover credits on a same-position upgrade when that does not lose projected points. Starters, the sixth man, and the coach count in full. The bench counts at half. One starter is captain and counts double. Starting shapes are 2-2-1, 1-2-2, 2-1-2, 1-3-1, and 3-1-1 (guards-forwards-centers).
 

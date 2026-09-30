@@ -301,6 +301,63 @@ def _fetch_players(token: str, list_id: int, matchday_id: int) -> list[dict]:
     return rows
 
 
+CLASSIC_GAME_MODE = 1
+
+
+def fetch_user_fantasy_teams(root: Path, game_mode: int = CLASSIC_GAME_MODE) -> list[dict]:
+    """Classic (or draft) Fantasy Challenge teams for the logged-in Fan ID."""
+    token = _api_token(root)
+    response = requests.get(
+        f"{FANTAKING}/user/fantasy-teams",
+        params={"league": LEAGUE_ID, "game_mode": int(game_mode)},
+        timeout=30,
+        headers=_headers(token),
+    )
+    if not response.ok:
+        raise RuntimeError(f"Could not load Fantasy Challenge teams ({_api_message(response)}).")
+    teams = _unwrap(response.json())
+    rows = []
+    for item in teams:
+        if not isinstance(item, dict) or item.get("id") in (None, ""):
+            continue
+        rows.append(
+            {
+                "id": int(item["id"]),
+                "name": str(item.get("name") or f"Team {item['id']}").strip(),
+                "matchday_id": _pick(item, "matchday_id")
+                or ((item.get("matchday") or {}).get("id") if isinstance(item.get("matchday"), dict) else None),
+            }
+        )
+    return rows
+
+
+def fetch_official_roster(root: Path, team_id: int, matchday_id: int | None = None) -> dict:
+    """Current round lineup for one Fantasy Challenge team (preview with names)."""
+    token = _api_token(root)
+    _, current_matchday = _league_ids(token)
+    round_id = int(matchday_id or current_matchday)
+    response = requests.get(
+        f"{FANTAKING}/fantasy-teams/{int(team_id)}/matchdays/{round_id}/roster/preview",
+        timeout=30,
+        headers=_headers(token),
+    )
+    if not response.ok:
+        raise RuntimeError(f"Could not load Fantasy Challenge roster ({_api_message(response)}).")
+    payload = response.json() if response.content else {}
+    data = payload.get("data") if isinstance(payload, dict) and isinstance(payload.get("data"), dict) else payload
+    if not isinstance(data, dict):
+        raise RuntimeError("Fantasy Challenge roster response was empty.")
+    players = data.get("players")
+    if not isinstance(players, list) or not players:
+        raise RuntimeError("Fantasy Challenge roster had no players.")
+    return {
+        "team_id": int(team_id),
+        "matchday_id": round_id,
+        "formation_id": data.get("formation_id"),
+        "players": players,
+    }
+
+
 def fetch_official_prices(root: Path) -> pd.DataFrame:
     """Current official quotations for the logged-in Fantasy Challenge account."""
     token = _api_token(root)

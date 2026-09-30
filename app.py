@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
 
 from src.cache import cache_dir, load_cache, refresh_cache
 from src.credentials import credentials_path, example_path, fantasy_login
+from src.import_squad import import_official_squad
 from src.prices import ensure_prices, load_price_meta, price_cache_path
 from src.injuries import ensure_injuries, injury_cache_path
 from src.optimize import _apply_horizon, _pid, build_best_team, slate_days
@@ -550,6 +551,7 @@ def _page_squad(data) -> None:
                 st.rerun()
     squad = load_squad(ROOT)
     projections = apply_player_credits(data.projections, load_credits(ROOT))
+    _import_official_section(active, squad, projections, data.coaches)
     existing_ids = {entry.get("player_id") for entry in squad["players"]}
     available = projections[~projections["player_id"].isin(existing_ids)].sort_values("player_name")
     options = {}
@@ -717,6 +719,87 @@ def _page_squad(data) -> None:
         st.warning(message)
     if not scored["messages"] and len(scored["players"]) == 10 and coach is not None:
         st.success("Roster shape matches the Fantasy Challenge: 4 guards, 4 forwards, 2 centers, and a coach.")
+
+
+def _import_official_section(active: str, squad: dict, projections: pd.DataFrame, coaches: pd.DataFrame) -> None:
+    """Optional one-click import from the logged-in Fantasy Challenge account."""
+    flash = st.session_state.pop("import_flash", None)
+    if flash:
+        st.success(flash)
+        for message in st.session_state.pop("import_flash_warnings", []):
+            st.warning(message)
+    with st.expander("Import from Fantasy Challenge", expanded=False):
+        st.caption(
+            "Pull the current official lineup into this saved team. Does nothing until you press Import. "
+            "Needs the same Fan ID file used for live credits."
+        )
+        if not fantasy_login(ROOT):
+            st.info(
+                f"Copy {example_path(ROOT).name} to {credentials_path(ROOT).name}, "
+                "add your EuroLeague Fan ID email and password, then try again."
+            )
+            return
+        remote_teams = st.session_state.get("import_fantasy_teams") or []
+        team_labels = {f"{team['name']} (id {team['id']})": int(team["id"]) for team in remote_teams}
+        selected_id = None
+        if len(team_labels) > 1:
+            choice = st.selectbox(
+                "Fantasy Challenge team",
+                list(team_labels),
+                key="import_fantasy_team_pick",
+            )
+            selected_id = team_labels[choice]
+        elif len(team_labels) == 1:
+            only_id = next(iter(team_labels.values()))
+            selected_id = only_id
+            st.caption(f"Will import: {next(iter(team_labels))}.")
+        has_players = bool(squad.get("players"))
+        replace = True
+        if has_players:
+            replace = st.checkbox(
+                f"Replace the players and coach on “{active}”",
+                value=False,
+                key="import_replace_confirm",
+                help="Import overwrites this saved team. Leave unchecked to cancel.",
+            )
+        if st.button("Import lineup", type="primary", key="import_official_lineup"):
+            if has_players and not replace:
+                st.warning(f"Check Replace to overwrite “{active}”, or create a new empty team first.")
+                return
+            with st.spinner("Loading Fantasy Challenge lineup..."):
+                try:
+                    result = import_official_squad(
+                        ROOT,
+                        projections,
+                        coaches,
+                        team_id=selected_id,
+                    )
+                except Exception as exc:
+                    st.error(str(exc))
+                    return
+            if result.get("teams"):
+                st.session_state["import_fantasy_teams"] = result["teams"]
+            if result.get("needs_team_choice"):
+                st.info("Choose which Fantasy Challenge team to import, then press Import lineup again.")
+                st.rerun()
+                return
+            mapped = result.get("squad") or {}
+            matched = int(result.get("matched_players") or 0)
+            if matched == 0:
+                st.error("No players from Fantasy Challenge could be matched to the local board.")
+                for message in result.get("warnings") or []:
+                    st.warning(message)
+                return
+            save_squad(ROOT, mapped)
+            st.session_state.pop("best_result", None)
+            label = result.get("team_name") or "Fantasy Challenge"
+            st.session_state["import_flash"] = (
+                f"Imported {matched} players"
+                + (" and a coach" if mapped.get("coach_id") else "")
+                + f" from {label} into “{active}”."
+            )
+            st.session_state["import_flash_warnings"] = list(result.get("warnings") or [])
+            st.rerun()
 
 
 def _with_player_status(players: pd.DataFrame, projections: pd.DataFrame) -> pd.DataFrame:
