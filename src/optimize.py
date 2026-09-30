@@ -207,6 +207,9 @@ def _records(projections: pd.DataFrame, day: pd.Timestamp | None) -> list[dict]:
                 "points_per_credit": None
                 if "points_per_credit" not in frame.columns or pd.isna(row.points_per_credit)
                 else float(row.points_per_credit),
+                "ownership": None
+                if "ownership" not in frame.columns or pd.isna(getattr(row, "ownership", None))
+                else float(row.ownership),
                 "availability": getattr(row, "availability", "available") or "available",
                 "status_label": getattr(row, "status_label", "Available") or "Available",
                 "injury_note": getattr(row, "injury_note", "") or "",
@@ -992,6 +995,7 @@ def _line(player: dict, slot: str, multiplier: float) -> dict:
         "price": player["price"],
         "projected": player["projected"],
         "points_per_credit": player["points_per_credit"],
+        "ownership": player.get("ownership"),
         "counted": player["projected"] * multiplier,
         "move": None if "kept" not in player else ("Keep" if player["kept"] else "New"),
         "availability": player.get("availability") or "available",

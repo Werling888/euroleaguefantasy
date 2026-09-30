@@ -268,6 +268,11 @@ def score_squad(
             captain_used = True
         info = by_player.get(player_id)
         projected = None if info is None or pd.isna(info.projected) else float(info.projected)
+        ownership = None
+        if info is not None and hasattr(info, "ownership"):
+            raw = info.ownership
+            if raw is not None and not pd.isna(raw):
+                ownership = float(raw)
         multiplier = 2.0 if captain else SLOT_MULTIPLIER[slot]
         points = None if projected is None else projected * multiplier
         price = None if info is None else _number(getattr(info, "price", None))
@@ -288,6 +293,7 @@ def score_squad(
                 "slot": slot,
                 "captain": captain,
                 "price": price,
+                "ownership": ownership,
                 "per_credit": per_credit,
                 "projected": projected,
                 "multiplier": multiplier,

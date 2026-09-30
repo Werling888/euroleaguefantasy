@@ -462,6 +462,11 @@ def fetch_official_prices(root: Path) -> pd.DataFrame:
         name = " ".join(part for part in (first, last) if part)
         if not name:
             continue
+        popularity = item.get("popularity")
+        try:
+            ownership = None if popularity in (None, "") else float(popularity)
+        except (TypeError, ValueError):
+            ownership = None
         rows.append(
             {
                 "source_name": name,
@@ -469,6 +474,7 @@ def fetch_official_prices(root: Path) -> pd.DataFrame:
                 "position_group": group,
                 "price": float(price),
                 "price_change": None,
+                "popularity": ownership,
             }
         )
     if not any(row["position_group"] in {"G", "F", "C"} for row in rows):

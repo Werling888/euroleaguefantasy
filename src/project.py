@@ -601,6 +601,9 @@ def build_dashboard(cache: dict[str, pd.DataFrame], season: str | None = None) -
             )
         coach_rows.append(record)
     coach_frame = pd.DataFrame(coach_rows)
+    from src.prices import assign_coach_ownership
+
+    coach_frame = assign_coach_ownership(coach_frame, cache.get("prices"))
 
     defense_rows = []
     teams = sorted(set(players["team_code"])) if not players.empty else []
