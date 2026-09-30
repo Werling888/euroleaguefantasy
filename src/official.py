@@ -362,6 +362,36 @@ def fetch_official_roster(root: Path, team_id: int, matchday_id: int | None = No
     }
 
 
+def suggested_changes_label(free_trades) -> str | None:
+    """Map official remaining free trades to a Best team Changes radio value (1-4)."""
+    try:
+        remaining = int(free_trades)
+    except (TypeError, ValueError):
+        return None
+    if remaining <= 0:
+        return None
+    return str(min(4, remaining))
+
+
+def change_radio_options(free_trades) -> list[str]:
+    """Changes radio choices. When free trades are known, hide counts above that limit.
+
+    Streamlit radios cannot disable individual options, so higher counts are omitted.
+    **All** stays available for a full local rebuild.
+    """
+    options = ["1", "2", "3", "4", "All"]
+    try:
+        remaining = int(free_trades)
+    except (TypeError, ValueError):
+        return options
+    if remaining < 0:
+        return options
+    if remaining == 0:
+        return ["All"]
+    allowed = {str(n) for n in range(1, min(4, remaining) + 1)}
+    return [label for label in options if label == "All" or label in allowed]
+
+
 def fetch_official_team_bank(root: Path, team_id: int | None = None) -> dict:
     """Full Fantasy Challenge bank for one Classic team (players + coach value)."""
     token = _api_token(root)
@@ -391,12 +421,24 @@ def fetch_official_team_bank(root: Path, team_id: int | None = None) -> dict:
     data = payload.get("data") if isinstance(payload, dict) and isinstance(payload.get("data"), dict) else payload
     if not isinstance(data, dict) or data.get("credits") in (None, ""):
         raise RuntimeError("Fantasy Challenge bank was missing from the API response.")
+    free_trades = data.get("trades")
+    max_trades = data.get("max_num_trades_per_matchday")
+    try:
+        free_trades = None if free_trades in (None, "") else int(free_trades)
+    except (TypeError, ValueError):
+        free_trades = None
+    try:
+        max_trades = None if max_trades in (None, "") else int(max_trades)
+    except (TypeError, ValueError):
+        max_trades = None
     return {
         "team_id": int(chosen["id"]),
         "team_name": chosen.get("name"),
         "matchday_id": round_id,
         "credits": float(data["credits"]),
         "total_plus": None if data.get("total_plus") in (None, "") else float(data["total_plus"]),
+        "free_trades": free_trades,
+        "max_trades": max_trades,
     }
 
 
@@ -447,6 +489,10 @@ def fetch_official_prices(root: Path) -> pd.DataFrame:
         meta["team_bank_id"] = bank.get("team_id")
         if bank.get("total_plus") is not None:
             meta["team_bank_plus"] = bank["total_plus"]
+        if bank.get("free_trades") is not None:
+            meta["free_trades"] = bank["free_trades"]
+        if bank.get("max_trades") is not None:
+            meta["max_trades"] = bank["max_trades"]
     except Exception as exc:
         meta["team_bank_error"] = str(exc)
     path = price_meta_path(root)

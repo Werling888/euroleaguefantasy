@@ -138,7 +138,7 @@ Each user of this repo must create their own `data/fantasy_credentials.propertie
 
 If the file is missing, Best team falls back to the public givemestats list for **players** only (opening prices). Coach credits and your Fantasy bank need the Fan ID login.
 
-After a successful official refresh, **Best team** prefills coach credits from the Fantasy list and the **Credits** budget from your Fantasy Challenge bank (players + coach value). You can still edit either.
+After a successful official refresh, **Best team** prefills coach credits from the Fantasy list, the **Credits** budget from your Fantasy Challenge bank (players + coach value), and **Changes** from your remaining free trades. You can still edit any of those.
 
 ## Data
 
