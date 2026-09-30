@@ -19,6 +19,7 @@ from src.official import change_radio_options, suggested_changes_label
 from src.prices import ensure_prices, load_price_meta, map_coach_prices, price_cache_path
 from src.injuries import ensure_injuries, injury_cache_path
 from src.optimize import _apply_horizon, _pid, build_best_team, slate_days
+from src.ownership import DIFFERENTIAL_MAX, TEMPLATE_MIN, differentials
 from src.project import FORM_GAMES, build_dashboard
 from src.squad import (
     BUDGET,
@@ -91,6 +92,7 @@ PLAYER_COLUMNS = [
     "**Per 36** — fantasy points scaled to 36 minutes.",
     "**Volatility** — how much the fantasy score swings. A low number is steadier, so it is green.",
     "**Price** — Fantasy Challenge credits. The public list can lag the official game after a round. Type current credits on Best team.",
+    "**Owned %** — share of Fantasy Challenge managers who own him (official Fan ID list only). Blank on the public price list.",
     "**Points per credit** — Fpts/g (the average of every game in the sample) divided by Price. One game of 10 is 10 per game. Two games of 10 and 30 is 20.",
     "**Projected** — expected fantasy points for the next game: his Fpts/g times how much fantasy this opponent allows to all G, or all F, or all C in a game versus the league (one star C is the whole C pie, not cloned onto every center), times home or away, times a 10% win bonus weighted by Win %. A one-game matchup is pulled toward last season.",
     "**Floor** / **Ceiling** — low and high outcomes from the last eight games, adjusted for the opponent, then scaled if Exp min rose because of a teammate injury.",
@@ -106,6 +108,7 @@ COACH_COLUMNS = [
     "**Avg margin** — average score difference in the sample. Positive means the club won by that many points on average.",
     "Coach **Projected** is the chance-weighted margin score for the next game. It counts in full, with no captain or bench multiplier.",
     "Coach **Floor** and **Ceiling** are the low and high margin scores from the last eight games.",
+    "Coach **Owned %** — share of managers who picked this coach (official list only).",
     "**Form** No games means this coach has no EuroLeague results in the cache, so only the next-game projection is filled in.",
 ]
 MATCHUP_COLUMNS = [
@@ -137,6 +140,7 @@ BEST_COLUMNS = [
     "**Counted** — Projected times that slot multiplier.",
     "**Projected** — expected fantasy points for the next game, before the slot multiplier. Matchup is that opponent's G/F/C game pie versus the league, not one starter's line times every player.",
     "**Price** and **Points per credit** — published credits, and Fpts/g divided by that price.",
+    "**Owned %** — share of managers who own him (official Fan ID list). Blank without official prices.",
 ]
 SQUAD_COLUMNS = [
     "**Status** — Available, a yellow unconfirmed status, or Out. Best team will not use anyone who is not Available.",
@@ -144,6 +148,7 @@ SQUAD_COLUMNS = [
     "**Slot** — starter, sixth, or bench. Five starters, one sixth man, four bench.",
     "**Captain** — one starter. That player counts double.",
     "**Price** — published credits. It counts toward the 100-credit budget.",
+    "**Owned %** — share of Fantasy Challenge managers who own him when official prices are loaded.",
     "**Points per credit** — Fpts/g (the average of every game in the sample) divided by Price. One game of 10 is 10 per game. Two games of 10 and 30 is 20.",
     "**Projected** — expected fantasy points for the next game, before the slot multiplier.",
     "**Counted** — Projected times the slot multiplier.",
@@ -161,6 +166,13 @@ def _round(value, digits=1):
     if pd.isna(value):
         return None
     return round(float(value), digits)
+
+
+def _owned_label(value) -> str | None:
+    """Format ownership share 0–1 as a percent string."""
+    if value is None or pd.isna(value):
+        return None
+    return f"{float(value) * 100:.0f}%"
 
 
 def _bands(frame: pd.DataFrame, columns: list[str]) -> dict[str, tuple[float, float]]:
@@ -268,6 +280,8 @@ def _coach_view(frame: pd.DataFrame) -> pd.DataFrame:
         )
     if "form_source" in view:
         view["form_source"] = view["form_source"].map(lambda value: FORM_LABELS.get(value, value))
+    if "ownership" in view:
+        view["ownership"] = view["ownership"].map(_owned_label)
     rename = {
         "coach_name": "Coach",
         "team_name": "Team",
@@ -279,6 +293,7 @@ def _coach_view(frame: pd.DataFrame) -> pd.DataFrame:
         "projected": "Projected",
         "floor": "Floor",
         "ceiling": "Ceiling",
+        "ownership": "Owned %",
         "opponent_name": "Opponent",
         "home_away": "H/A",
         "win_prob": "Win %",
@@ -331,6 +346,8 @@ def _board_view(frame: pd.DataFrame) -> pd.DataFrame:
         lambda value: None if value is None or pd.isna(value) else f"{float(value):.0%}"
     )
     view["form_source"] = view["form_source"].map(lambda value: FORM_LABELS.get(value, value))
+    if "ownership" in view.columns:
+        view["ownership"] = view["ownership"].map(_owned_label)
     rename = {
         "player_name": "Player",
         "team_name": "Team",
@@ -345,6 +362,7 @@ def _board_view(frame: pd.DataFrame) -> pd.DataFrame:
         "fantasy_per36": "Per 36",
         "volatility": "Volatility",
         "price": "Price",
+        "ownership": "Owned %",
         "points_per_credit": "Points per credit",
         "projected": "Projected",
         "floor": "Floor",
@@ -372,7 +390,7 @@ def _filter_board(frame: pd.DataFrame) -> pd.DataFrame:
     with sort_col:
         sort = st.selectbox(
             "Sort",
-            ["Points per credit", "Projected", "Per 36", "Last 5", "Minutes"],
+            ["Points per credit", "Projected", "Owned %", "Per 36", "Last 5", "Minutes"],
             key="board_sort",
         )
     search_col, minutes_col, status_col = st.columns([2, 1, 1])
@@ -403,10 +421,13 @@ def _filter_board(frame: pd.DataFrame) -> pd.DataFrame:
     sort_column = {
         "Points per credit": "points_per_credit",
         "Projected": "projected",
+        "Owned %": "ownership",
         "Per 36": "fantasy_per36",
         "Last 5": "last5_fantasy",
         "Minutes": "minutes",
     }[sort]
+    if sort_column not in view.columns:
+        sort_column = "projected"
     return view.sort_values(sort_column, ascending=False, na_position="last")
 
 
@@ -432,10 +453,50 @@ def _page_board(data) -> None:
     st.caption(
         f"{len(filtered)} players. Leave Team on All teams to see the league, or pick one club. {COLOR_NOTE} {STATUS_NOTE}"
     )
+    _show_differentials(data.projections)
     st.subheader("Coaches")
     coaches = _coaches_for(data.coaches)
     st.dataframe(_styled_coaches(coaches, data.coaches), hide_index=True, width="stretch")
     st.caption(f"{len(coaches)} coaches. Colors compare coaches with each other. {COLOR_NOTE}")
+
+
+def _show_differentials(projections: pd.DataFrame, held_ids: list[str] | None = None) -> None:
+    """Low-owned pickups and highly owned players missing from the saved team."""
+    if held_ids is None:
+        squad = load_squad(ROOT)
+        held_ids = [entry.get("player_id") for entry in squad.get("players") or []]
+    diffs, risk = differentials(projections, held_ids)
+    has_ownership = (
+        projections is not None
+        and not projections.empty
+        and "ownership" in projections.columns
+        and projections["ownership"].notna().any()
+    )
+    with st.expander("Differentials and template risk", expanded=False):
+        if not has_ownership:
+            st.caption(
+                "Owned % needs the official Fantasy Challenge list. Add Fan ID credentials and press Refresh data."
+            )
+            return
+        low_pct = int(DIFFERENTIAL_MAX * 100)
+        high_pct = int(TEMPLATE_MIN * 100)
+        st.caption(
+            f"Compared with your saved My team. Differentials: Available, under {low_pct}% owned, sorted by Projected. "
+            f"Template risk: Available, {high_pct}%+ owned, not on your team."
+        )
+        left, right = st.columns(2)
+        with left:
+            st.markdown("**Differentials**")
+            if diffs.empty:
+                st.caption("None under the ownership cutoff.")
+            else:
+                st.dataframe(_styled_board(diffs, projections), hide_index=True, width="stretch")
+        with right:
+            st.markdown("**Template risk**")
+            if risk.empty:
+                st.caption("You cover the highly owned Available players.")
+            else:
+                st.dataframe(_styled_board(risk, projections), hide_index=True, width="stretch")
 
 
 def _page_matchup(data) -> None:
@@ -585,53 +646,49 @@ def _page_squad(data) -> None:
     if players.empty:
         st.info("Add 10 players: 4 guards, 4 forwards, 2 centers.")
     else:
-        editor = players[
-            [
-                "player_id",
-                "player_name",
-                "team_name",
-                "position_group",
-                "status_label",
-                "injury_note",
-                "slot",
-                "captain",
-                "price",
-                "per_credit",
-                "projected",
-                "points",
-            ]
-        ].copy()
+        columns = [
+            "player_id",
+            "player_name",
+            "team_name",
+            "position_group",
+            "status_label",
+            "injury_note",
+            "slot",
+            "captain",
+            "price",
+            "per_credit",
+            "projected",
+            "points",
+        ]
+        if "ownership" in players.columns:
+            columns.insert(columns.index("price") + 1, "ownership")
+        editor = players[columns].copy()
+        if "ownership" in editor.columns:
+            editor["ownership"] = editor["ownership"].map(_owned_label)
+        disabled = [column for column in columns if column not in {"slot", "captain"}]
+        column_config = {
+            "player_id": st.column_config.TextColumn("Id"),
+            "player_name": st.column_config.TextColumn("Player"),
+            "team_name": st.column_config.TextColumn("Team"),
+            "position_group": st.column_config.TextColumn("Pos"),
+            "status_label": st.column_config.TextColumn("Status"),
+            "injury_note": st.column_config.TextColumn("Note"),
+            "slot": st.column_config.SelectboxColumn("Slot", options=SLOTS, required=True),
+            "captain": st.column_config.CheckboxColumn("Captain"),
+            "price": st.column_config.NumberColumn("Price", format="%.1f"),
+            "per_credit": st.column_config.NumberColumn("Points per credit", format="%.2f"),
+            "projected": st.column_config.NumberColumn("Projected", format="%.1f"),
+            "points": st.column_config.NumberColumn("Counted", format="%.1f"),
+        }
+        if "ownership" in editor.columns:
+            column_config["ownership"] = st.column_config.TextColumn("Owned %")
         edited = st.data_editor(
             editor,
             hide_index=True,
             width="stretch",
             key=f"squad_editor_{active}",
-            disabled=[
-                "player_id",
-                "player_name",
-                "team_name",
-                "position_group",
-                "status_label",
-                "injury_note",
-                "price",
-                "per_credit",
-                "projected",
-                "points",
-            ],
-            column_config={
-                "player_id": st.column_config.TextColumn("Id"),
-                "player_name": st.column_config.TextColumn("Player"),
-                "team_name": st.column_config.TextColumn("Team"),
-                "position_group": st.column_config.TextColumn("Pos"),
-                "status_label": st.column_config.TextColumn("Status"),
-                "injury_note": st.column_config.TextColumn("Note"),
-                "slot": st.column_config.SelectboxColumn("Slot", options=SLOTS, required=True),
-                "captain": st.column_config.CheckboxColumn("Captain"),
-                "price": st.column_config.NumberColumn("Price", format="%.1f"),
-                "per_credit": st.column_config.NumberColumn("Points per credit", format="%.2f"),
-                "projected": st.column_config.NumberColumn("Projected", format="%.1f"),
-                "points": st.column_config.NumberColumn("Counted", format="%.1f"),
-            },
+            disabled=disabled,
+            column_config=column_config,
         )
         if "availability" in players.columns:
             blocked = players[players["availability"] != "available"]
@@ -640,6 +697,10 @@ def _page_squad(data) -> None:
                     f"{row.player_name} ({row.status_label})" for row in blocked.itertuples(index=False)
                 )
                 st.warning(f"Not confirmed to play: {names}.")
+        _show_differentials(
+            projections,
+            held_ids=[entry.get("player_id") for entry in squad.get("players") or []],
+        )
         remove = st.multiselect(
             "Remove",
             options=players["player_id"].tolist(),
@@ -869,6 +930,8 @@ def _best_view(frame: pd.DataFrame) -> pd.DataFrame:
             view[column] = view[column].map(lambda value, digits=digits: _round(value, digits))
     if "form_source" in view.columns:
         view["form_source"] = view["form_source"].map(lambda value: FORM_LABELS.get(value, value) if value else "")
+    if "ownership" in view.columns:
+        view["ownership"] = view["ownership"].map(_owned_label)
     rename = {
         "slot": "Slot",
         "player_name": "Player",
@@ -883,6 +946,7 @@ def _best_view(frame: pd.DataFrame) -> pd.DataFrame:
         "form_source": "Form",
         "expected_minutes": "Exp min",
         "price": "Price",
+        "ownership": "Owned %",
         "projected": "Projected",
         "points_per_credit": "Points per credit",
         "counted": "Counted",

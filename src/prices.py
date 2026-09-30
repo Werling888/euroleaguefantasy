@@ -143,6 +143,7 @@ def fetch_fantasy_prices() -> pd.DataFrame:
                 "position_group": item["position"],
                 "price": float(price),
                 "price_change": change_value,
+                "popularity": None,
             }
         )
     if not rows:
@@ -286,6 +287,19 @@ def _chosen_list_row(name: str, team_name: str, prices: pd.DataFrame, index: dic
     return None
 
 
+def _list_popularity(chosen) -> float | None:
+    """Ownership share (0–1) from a Fantasy Challenge list row, if present."""
+    if chosen is None or "popularity" not in getattr(chosen, "index", []):
+        return None
+    value = chosen["popularity"]
+    if value in (None, "") or pd.isna(value):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def map_coach_prices(coaches: pd.DataFrame, prices: pd.DataFrame) -> dict[str, float]:
     """Match local coaches to official coach quotations by name and team."""
     rows = coach_price_rows(prices)
@@ -301,20 +315,42 @@ def map_coach_prices(coaches: pd.DataFrame, prices: pd.DataFrame) -> dict[str, f
     return mapped
 
 
+def assign_coach_ownership(coaches: pd.DataFrame, prices: pd.DataFrame) -> pd.DataFrame:
+    """Attach Fantasy Challenge ownership share to each coach when the list has it."""
+    frame = coaches.copy() if coaches is not None else pd.DataFrame()
+    if frame.empty:
+        return frame
+    frame["ownership"] = pd.NA
+    rows = coach_price_rows(prices)
+    if rows is None or rows.empty or "popularity" not in rows.columns:
+        return frame
+    index = _candidate_indexes(rows)
+    assigned = []
+    for row in frame.itertuples(index=False):
+        chosen = _chosen_list_row(row.coach_name, row.team_name, rows, index)
+        assigned.append(_list_popularity(chosen))
+    frame["ownership"] = assigned
+    return frame
+
+
 def assign_prices(players: pd.DataFrame, prices: pd.DataFrame) -> pd.DataFrame:
-    """Attach a published credit price and points per credit to each player."""
+    """Attach published credit price, ownership share, and points per credit."""
     frame = players.copy()
     frame["price"] = pd.NA
+    frame["ownership"] = pd.NA
     market = player_price_rows(prices)
     if market is None or market.empty:
         frame["points_per_credit"] = pd.NA
         return frame
     index = _candidate_indexes(market)
-    assigned = []
+    assigned_prices = []
+    assigned_ownership = []
     for player in frame.itertuples(index=False):
         chosen = _chosen_list_row(player.player_name, player.team_name, market, index)
-        assigned.append(None if chosen is None else float(chosen.price))
-    frame["price"] = assigned
+        assigned_prices.append(None if chosen is None else float(chosen.price))
+        assigned_ownership.append(_list_popularity(chosen))
+    frame["price"] = assigned_prices
+    frame["ownership"] = assigned_ownership
     from src.squad import fill_points_per_credit
 
     return fill_points_per_credit(frame)

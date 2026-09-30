@@ -76,7 +76,7 @@ You do not need to delete `data/cache` to pick up code changes. Sidebar **Refres
 
 ## Pages
 
-- **Player board** — every player, with team, position, venue, minutes, and sort filters.
+- **Player board** — every player, with team, position, venue, minutes, and sort filters. With official Fan ID prices, **Owned %** and a Differentials / template-risk expander (low-owned pickups vs highly owned players missing from My team).
 - **Matchup** — one club’s next game and how many fantasy points that defense allows.
 - **Best team** — a legal squad for the next round, one tip day, or the next 1–5 rounds. **Start best team** runs from the selected saved team. After you save a new lineup on My team, press Start again; the old suggestion is not kept on screen. **Copy this squad** writes that lineup into My team.
 - **My team** — your own lineup, saved in `data/squad.json`. Optional **Import from Fantasy Challenge** pulls the official lineup for your Fan ID into the selected saved team (overwrite only when you confirm).
@@ -99,6 +99,7 @@ Green is the top third of the league, yellow the middle, red the bottom. Volatil
 - **Per 36** — fantasy points scaled to 36 minutes.
 - **Volatility** — how much the fantasy score swings.
 - **Price** — published Fantasy Challenge credits.
+- **Owned %** — share of Fantasy Challenge managers who own him (from the official Fan ID list). Blank when using the public price list.
 - **Points per credit** — Projected divided by Price.
 - **Projected** — expected fantasy points for the next game: Fpts/g times that opponent's G/F/C game pie versus the league (one star is the whole pie, not cloned onto every player; a one-game matchup is pulled toward last season), then home or away and a 10% win bonus weighted by win chance. After one game this season, Fpts/g is this season only.
 - **Floor** / **Ceiling** — low and high outcomes from the last eight games, adjusted for the opponent.
