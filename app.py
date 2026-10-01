@@ -19,6 +19,7 @@ from src.official import change_radio_options, suggested_changes_label
 from src.prices import ensure_prices, load_price_meta, map_coach_prices, price_cache_path
 from src.injuries import ensure_injuries, injury_cache_path
 from src.optimize import _apply_horizon, _pid, build_best_team, slate_days
+from src.trades import suggest_trade_upgrades, trade_records
 from src.ownership import DIFFERENTIAL_MAX, TEMPLATE_MIN, differentials
 from src.project import FORM_GAMES, build_dashboard
 from src.squad import (
@@ -141,6 +142,7 @@ BEST_COLUMNS = [
     "**Projected** — expected fantasy points for the next game, before the slot multiplier. Matchup is that opponent's G/F/C game pie versus the league, not one starter's line times every player.",
     "**Price** and **Points per credit** — published credits, and Fpts/g divided by that price.",
     "**Owned %** — share of managers who own him (official Fan ID list). Blank without official prices.",
+    "**Trade one player** — same-position upgrades at or below his price; sorted by +Counted for his My team slot (captain 2×, bench 0.5×). Needs at least +1.0 projected and +0.5 counted. Shows bank freed when the pick is cheaper.",
 ]
 SQUAD_COLUMNS = [
     "**Status** — Available, a yellow unconfirmed status, or Out. Best team will not use anyone who is not Available.",
@@ -1032,6 +1034,187 @@ def _show_squad_diff(
     )
 
 
+def _trade_view(frame: pd.DataFrame) -> pd.DataFrame:
+    view = frame.copy()
+    for column, digits in (
+        ("price", 1),
+        ("projected", 1),
+        ("counted", 1),
+        ("delta_projected", 1),
+        ("delta_counted", 1),
+        ("delta_price", 1),
+        ("credit_freed", 1),
+        ("expected_minutes", 1),
+        ("floor", 1),
+        ("ceiling", 1),
+        ("opp_factor", 2),
+        ("points_per_credit", 2),
+    ):
+        if column in view.columns:
+            view[column] = view[column].map(lambda value, digits=digits: _round(value, digits))
+    if "ownership" in view.columns:
+        view["ownership"] = view["ownership"].map(_owned_label)
+    rename = {
+        "player_name": "Player",
+        "team_name": "Team",
+        "position_group": "Pos",
+        "opponent_name": "Opponent",
+        "home_away": "H/A",
+        "turn": "Turn",
+        "price": "Price",
+        "projected": "Projected",
+        "counted": "Counted",
+        "delta_projected": "+Proj",
+        "delta_counted": "+Counted",
+        "delta_price": "Price Δ",
+        "credit_freed": "Bank freed",
+        "expected_minutes": "Exp min",
+        "floor": "Floor",
+        "ceiling": "Ceiling",
+        "opp_factor": "Opp factor",
+        "ownership": "Owned %",
+        "points_per_credit": "Points per credit",
+    }
+    keep = [key for key in rename if key in view.columns]
+    return view[keep].rename(columns=rename)
+
+
+def _trade_suggestions_box(
+    team_name: str,
+    saved: dict,
+    saved_ids: list[str],
+    projections: pd.DataFrame,
+    coaches: pd.DataFrame,
+    horizon: int,
+    day,
+    price_meta: dict | None = None,
+) -> None:
+    meta = price_meta or {}
+    free_trades = meta.get("free_trades")
+    max_trades = meta.get("max_trades")
+    team_bank = meta.get("team_bank")
+    with st.expander("Trade one player", expanded=False):
+        st.caption(
+            f"Upgrade one spot on **{team_name}**: same G/F/C, Available only, price at or below the player you drop. "
+            f"Sorted by **+Counted** for his My team slot. Needs at least +1.0 projected and +0.5 counted. "
+            f"Uses **Rounds** and **Slate** above. Six-per-club and T1 cap use the other nine."
+        )
+        if free_trades not in (None, ""):
+            try:
+                free_n = int(free_trades)
+            except (TypeError, ValueError):
+                free_n = None
+            if free_n is not None:
+                cap = f" / {int(max_trades)}" if max_trades not in (None, "") else ""
+                if free_n > 0:
+                    st.caption(
+                        f"Official account: **{free_n}{cap}** free trade(s) left — this swap uses **one** in Fantasy Challenge."
+                    )
+                else:
+                    st.caption(
+                        "Official account: **no free trades** left; a move in the app may cost a hit. "
+                        "This list still respects the price cap you set here."
+                    )
+        if team_bank not in (None, ""):
+            try:
+                st.caption(f"Fantasy bank (players + coach): **{float(team_bank):.1f}** credits.")
+            except (TypeError, ValueError):
+                pass
+        entries = saved.get("players") or []
+        if not entries:
+            st.info("This saved team has no players. Add or import a lineup on My team.")
+            return
+        window_players, _ = _apply_horizon(projections, coaches, int(horizon))
+        if window_players is None or window_players.empty:
+            st.info("Projections are not loaded.")
+            return
+        lookup = window_players.copy()
+        lookup["_pid"] = lookup["player_id"].map(_pid)
+        labels: dict[str, str] = {}
+        for entry in entries:
+            pid = _pid(entry.get("player_id"))
+            row = lookup[lookup["_pid"] == pid]
+            if row.empty:
+                name = pid
+                labels[f"{name} (not on this slate)"] = pid
+                continue
+            info = row.iloc[0]
+            name = info.player_name if hasattr(info, "player_name") else info["player_name"]
+            pos = info.position_group
+            price = info.price
+            proj = info.projected
+            price_text = "—" if pd.isna(price) else f"{float(price):.1f}"
+            proj_text = "—" if pd.isna(proj) else f"{float(proj):.1f}"
+            labels[f"{name} · {pos} · {price_text} cr · {proj_text} proj"] = pid
+        if not labels:
+            st.warning("No players on this saved team.")
+            return
+        choice = st.selectbox("Player to trade out", list(labels), key="trade_out_pick")
+        outgoing_id = labels[choice]
+        if st.button("Find upgrades", key="trade_find_upgrades"):
+            records = trade_records(window_players, day)
+            outcome = suggest_trade_upgrades(
+                outgoing_id,
+                saved_ids,
+                records,
+                saved_players=entries,
+            )
+            st.session_state["trade_result"] = outcome
+        outcome = st.session_state.get("trade_result")
+        if not outcome:
+            return
+        outgoing = outcome.get("outgoing")
+        if outgoing and _pid(outgoing.get("player_id")) != _pid(outgoing_id):
+            return
+        if outcome.get("message") and not outcome.get("candidates"):
+            st.warning(outcome["message"])
+            return
+        candidates = outcome.get("candidates") or []
+        if outgoing:
+            slot = outcome.get("slot_label") or "slot"
+            counted = outcome.get("outgoing_counted")
+            counted_text = ""
+            if counted is not None:
+                counted_text = f", {float(counted):.1f} counted as {slot}"
+            st.caption(
+                f"Trading out **{outgoing['player_name']}** ({outgoing['position_group']}, "
+                f"{float(outgoing['price']):.1f} credits, {float(outgoing['projected']):.1f} projected{counted_text})."
+            )
+        if not candidates:
+            if outcome.get("message"):
+                st.warning(outcome["message"])
+            return
+        frame = pd.DataFrame(candidates)
+        bands = _bands(
+            window_players,
+            ["projected", "delta_projected", "delta_counted", "opp_factor", "expected_minutes"],
+        )
+        st.dataframe(
+            _paint(
+                _trade_view(frame),
+                frame,
+                bands,
+                {
+                    "projected": "Projected",
+                    "delta_projected": "+Proj",
+                    "delta_counted": "+Counted",
+                    "opp_factor": "Opp factor",
+                    "expected_minutes": "Exp min",
+                },
+            ),
+            hide_index=True,
+            width="stretch",
+        )
+        freed = frame["credit_freed"].fillna(0) if "credit_freed" in frame.columns else None
+        freed_note = ""
+        if freed is not None and (freed > 0).any():
+            best = float(freed.max())
+            freed_note = f" Up to **{best:.1f}** credits returned to bank on the cheapest pick."
+        st.caption(
+            f"Top {len(candidates)} upgrade(s) by +Counted (min +1.0 proj, +0.5 counted).{freed_note} {COLOR_NOTE}"
+        )
+
+
 def _show_unavailable(projections: pd.DataFrame, day) -> None:
     left_out = (
         projections[projections["availability"] != "available"].copy()
@@ -1269,6 +1452,16 @@ def _page_best(data) -> None:
         st.caption(f"The coach from {team_name} stays. Check Include coach in changes to let Best team pick another.")
     elif include_coach:
         st.caption("The coach is included in the update: Best team picks among coaches with typed credits.")
+    _trade_suggestions_box(
+        team_name,
+        saved,
+        saved_ids,
+        data.projections,
+        data.coaches,
+        int(horizon),
+        day,
+        price_meta,
+    )
     st.markdown(
         "<style>.st-key-start_best_team button {background-color:#2e7d32 !important;border-color:#2e7d32 !important;color:#ffffff !important;}</style>",
         unsafe_allow_html=True,

@@ -210,6 +210,15 @@ def _records(projections: pd.DataFrame, day: pd.Timestamp | None) -> list[dict]:
                 "ownership": None
                 if "ownership" not in frame.columns or pd.isna(getattr(row, "ownership", None))
                 else float(row.ownership),
+                "opp_factor": None
+                if "opp_factor" not in frame.columns or pd.isna(getattr(row, "opp_factor", None))
+                else float(row.opp_factor),
+                "floor": None
+                if "floor" not in frame.columns or pd.isna(getattr(row, "floor", None))
+                else float(row.floor),
+                "ceiling": None
+                if "ceiling" not in frame.columns or pd.isna(getattr(row, "ceiling", None))
+                else float(row.ceiling),
                 "availability": getattr(row, "availability", "available") or "available",
                 "status_label": getattr(row, "status_label", "Available") or "Available",
                 "injury_note": getattr(row, "injury_note", "") or "",
