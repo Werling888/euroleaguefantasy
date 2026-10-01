@@ -76,9 +76,9 @@ You do not need to delete `data/cache` to pick up code changes. Sidebar **Refres
 
 ## Pages
 
-- **Player board** — every player, with team, position, venue, minutes, and sort filters. With official Fan ID prices, **Owned %** and a Differentials / template-risk expander (low-owned pickups vs highly owned players missing from My team).
+- **Player board** — every player, with team, position, venue, minutes, sort, and (when the round spans more than one day) **Turn** (T1/T2/T3) filters. With official Fan ID prices, **Owned %** and a Differentials / template-risk expander (low-owned pickups vs highly owned players missing from My team). The Player column is pinned; any other column can be pinned too from its header menu.
 - **Matchup** — one club’s next game and how many fantasy points that defense allows.
-- **Best team** — a legal squad for the next round, one tip day, or the next 1–5 rounds. **Start best team** runs from the selected saved team. **Trade one player** suggests same-position upgrades at or below that player’s price with a higher projection. After you save a new lineup on My team, press Start again; the old suggestion is not kept on screen. **Copy this squad** writes that lineup into My team.
+- **Best team** — a legal squad for the next round, one tip day, or the next 1–5 rounds. **Changes** picks how many new players come in; the **Mode** toggle next to it is Exact (bring in exactly that many) or Up to (Best team may use fewer if that scores just as well or better). **Start best team** runs from the selected saved team. **Trade one player** suggests same-position upgrades at or below that player’s price with a higher projection. After you save a new lineup on My team, press Start again; the old suggestion is not kept on screen. **Copy this squad** writes that lineup into My team.
 - **My team** — your own lineup, saved in `data/squad.json`. Optional **Import from Fantasy Challenge** pulls the official lineup for your Fan ID into the selected saved team (overwrite only when you confirm).
 
 Roster rules: 4 guards, 4 forwards, 2 centers, and the credits you type on Best team (100 in Fantasy Challenge), at most 6 players from one club. Best team spends leftover credits on a same-position upgrade when that does not lose projected points. Starters, the sixth man, and the coach count in full. The bench counts at half. One starter is captain and counts double. Starting shapes are 2-2-1, 1-2-2, 2-1-2, 1-3-1, and 3-1-1 (guards-forwards-centers).
@@ -97,11 +97,12 @@ Green is the top third of the league, yellow the middle, red the bottom. Volatil
 - **Fpts/g** — fantasy points per game. A win is PIR plus 10%. A loss is PIR.
 - **Last 5** — average fantasy points over the last five games.
 - **Per 36** — fantasy points scaled to 36 minutes.
+- **Shots/g** — average field goal attempts per game. Nudges Projected up to ±10% versus his position's average, shrunk toward no effect in a small sample.
 - **Volatility** — how much the fantasy score swings.
 - **Price** — published Fantasy Challenge credits.
 - **Owned %** — share of Fantasy Challenge managers who own him (from the official Fan ID list). Blank when using the public price list.
 - **Points per credit** — Projected divided by Price.
-- **Projected** — expected fantasy points for the next game: Fpts/g times that opponent's G/F/C game pie versus the league (one star is the whole pie, not cloned onto every player; a one-game matchup is pulled toward last season), then home or away and a 10% win bonus weighted by win chance. After one game this season, Fpts/g is this season only.
+- **Projected** — expected fantasy points for the next game: Fpts/g times that opponent's G/F/C game pie versus the league (one star is the whole pie, not cloned onto every player; a one-game matchup is pulled toward last season), then home or away, a 10% win bonus weighted by win chance, and the Shots/g nudge. After one game this season, Fpts/g is this season only.
 - **Floor** / **Ceiling** — low and high outcomes from the last eight games, adjusted for the opponent.
 - **Opponent** — next rival.
 - **H/A** — Home or Away.
