@@ -253,6 +253,7 @@ def parse_box_score(box: dict, game: dict) -> tuple[list[dict], list[dict]]:
                     "minutes": seconds / 60.0,
                     "played": played,
                     "pir": pir,
+                    "shots": float(stats.get("fieldGoalsAttemptedTotal") or 0),
                     "fantasy": player_fantasy(pir, won) if played else 0.0,
                     "starter": bool(stats.get("startFive")),
                 }

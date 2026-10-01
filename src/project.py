@@ -364,6 +364,31 @@ def _sample_averages(current: pd.DataFrame, prior: pd.DataFrame):
     return season_fantasy, last5, minutes, gp_current, per36, volatility, sample_gp
 
 
+def _shots_per_game(current: pd.DataFrame, prior: pd.DataFrame) -> float | None:
+    sample = _form_sample(current, prior)
+    if sample is None or sample.empty or "shots" not in sample.columns:
+        return None
+    return float(sample["shots"].mean())
+
+
+# A player who takes more shots than his position's average has more chances to
+# score, so nudge projected up or down a little for shot volume. Shrunk toward
+# 1.0 (no effect) while the sample is small, and capped modestly so it nudges
+# rather than overrides the PIR-based baseline.
+SHOT_SHRINK_GAMES = 4
+SHOT_FLOOR = 0.90
+SHOT_CEILING = 1.10
+
+
+def _shot_factor(shots_per_game: float | None, position_avg_shots: float | None, games: int) -> float:
+    if shots_per_game is None or not position_avg_shots:
+        return 1.0
+    n = max(int(games), 0)
+    raw = shots_per_game / position_avg_shots
+    shrunk = (n * raw + SHOT_SHRINK_GAMES * 1.0) / (n + SHOT_SHRINK_GAMES)
+    return max(SHOT_FLOOR, min(SHOT_CEILING, shrunk))
+
+
 def build_dashboard(cache: dict[str, pd.DataFrame], season: str | None = None) -> DashboardData:
     """Project every active player and coach for the upcoming round.
 
@@ -429,12 +454,15 @@ def build_dashboard(cache: dict[str, pd.DataFrame], season: str | None = None) -
         return factor_memo[key]
 
     position_avg = {}
+    shots_avg = {}
     if not logs.empty:
         current_all = logs[logs["season_code"] == CURRENT_SEASON]
         prior_all = logs[logs["season_code"] == PRIOR_SEASON]
         fill = current_all if not current_all.empty else prior_all
         for position, group in fill.groupby("position_group"):
             position_avg[position] = float(group["fantasy"].mean())
+            if "shots" in group.columns:
+                shots_avg[position] = float(group["shots"].mean())
 
     grouped = {
         (season, player_id): group.sort_values("date")
@@ -458,6 +486,8 @@ def build_dashboard(cache: dict[str, pd.DataFrame], season: str | None = None) -
         season_fantasy, last5, minutes, gp_current, per36, volatility, sample_gp = _sample_averages(
             current_logs, prior_logs
         )
+        shots_per_game = _shots_per_game(current_logs, prior_logs)
+        shot_factor = _shot_factor(shots_per_game, shots_avg.get(position), sample_gp)
         form_logs = _form_sample(current_logs, prior_logs)
         home_ratio, away_ratio = _home_away_ratios(form_logs)
         schedule = []
@@ -470,8 +500,9 @@ def build_dashboard(cache: dict[str, pd.DataFrame], season: str | None = None) -
                     player.team_code, game["opponent_code"], game["is_home"]
                 )
                 # baseline is Fpts/g. factor is this team's G/F/C game pie versus
-                # the league pie, shrunk while few games are in.
-                projected = baseline * factor * ratio * (1.0 + 0.10 * chance)
+                # the league pie, shrunk while few games are in. shot_factor nudges
+                # for shot volume versus the position average, also shrunk early.
+                projected = baseline * factor * ratio * (1.0 + 0.10 * chance) * shot_factor
                 schedule.append(
                     {
                         "round": game["round"],
@@ -499,6 +530,7 @@ def build_dashboard(cache: dict[str, pd.DataFrame], season: str | None = None) -
             "last5_fantasy": last5,
             "fantasy_per36": per36,
             "volatility": volatility,
+            "shots_per_game": shots_per_game,
             "form_source": source,
             "opponent_code": None,
             "opponent_name": None,

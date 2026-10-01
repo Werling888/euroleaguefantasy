@@ -207,6 +207,9 @@ def _records(projections: pd.DataFrame, day: pd.Timestamp | None) -> list[dict]:
                 "points_per_credit": None
                 if "points_per_credit" not in frame.columns or pd.isna(row.points_per_credit)
                 else float(row.points_per_credit),
+                "shots_per_game": None
+                if "shots_per_game" not in frame.columns or pd.isna(getattr(row, "shots_per_game", None))
+                else float(row.shots_per_game),
                 "ownership": None
                 if "ownership" not in frame.columns or pd.isna(getattr(row, "ownership", None))
                 else float(row.ownership),
@@ -712,11 +715,34 @@ def _search_changes(records: list[dict], held_ids: list[str], changes: int, spen
     return ("squad",) + best[:5]
 
 
-def _pick_lineup(records: list[dict], spend_cap: float, coach_points: float, held: list[str], changes: int):
-    """Ten players inside spend_cap. Coach points only break ties in slotting."""
+def _pick_lineup(
+    records: list[dict],
+    spend_cap: float,
+    coach_points: float,
+    held: list[str],
+    changes: int,
+    exact: bool = True,
+):
+    """Ten players inside spend_cap. Coach points only break ties in slotting.
+
+    `exact=True` brings in exactly `changes` new players (today's only mode).
+    `exact=False` tries up to `changes`, keeping the saved squad closer to
+    intact when fewer swaps score at least as well (ties favor more changes).
+    """
     requested = int(changes)
     if held and requested < 10:
-        outcome = _search_changes(records, held, requested, spend_cap, coach_points)
+        if exact:
+            outcome = _search_changes(records, held, requested, spend_cap, coach_points)
+        else:
+            outcome = None
+            for k in range(requested, -1, -1):
+                trial = _search_changes(records, held, k, spend_cap, coach_points)
+                if trial[0] != "squad":
+                    if outcome is None:
+                        outcome = trial
+                    continue
+                if outcome is None or outcome[0] != "squad" or trial[1] > outcome[1] + 1e-9:
+                    outcome = trial
         if outcome[0] == "squad":
             _kind, _total, starters, sixth, bench, remain_ids = outcome
             starters, sixth, bench = _tidy_slots(starters, sixth, bench)
@@ -857,6 +883,7 @@ def build_best_team(
     coach_id: str | None = None,
     coach_prices: dict | None = None,
     lock_coach: bool = False,
+    exact: bool = True,
 ) -> dict:
     """Pick 4 guards, 4 forwards, 2 centers and a priced coach for one slate."""
     horizon = max(int(horizon or 1), 1)
@@ -900,7 +927,7 @@ def build_best_team(
         spend_cap = budget - price
         key = round(float(spend_cap), 1)
         if key not in by_cap:
-            by_cap[key] = _pick_lineup(records, spend_cap, 0.0, held, changes)
+            by_cap[key] = _pick_lineup(records, spend_cap, 0.0, held, changes, exact)
         pack = by_cap[key]
         if pack[0] == "message":
             last_message = pack[1]
@@ -1004,6 +1031,7 @@ def _line(player: dict, slot: str, multiplier: float) -> dict:
         "price": player["price"],
         "projected": player["projected"],
         "points_per_credit": player["points_per_credit"],
+        "shots_per_game": player.get("shots_per_game"),
         "ownership": player.get("ownership"),
         "counted": player["projected"] * multiplier,
         "move": None if "kept" not in player else ("Keep" if player["kept"] else "New"),
