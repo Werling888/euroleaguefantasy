@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.project import CURRENT_SEASON, PRIOR_SEASON, _defense_profiles, _opponent_factor, _shrink_factor
+from src.project import CURRENT_SEASON, PRIOR_SEASON, _defense_profiles, _opponent_factor, _season_factor, _shrink_factor
 
 
 def _row(season, opponent, game, position, fantasy, minutes, day, team="AAA"):
@@ -101,6 +101,17 @@ class GamePieTest(unittest.TestCase):
         f_pie = profiles[(profiles.opponent_code == "PRS") & (profiles.position_group == "F")].iloc[0]
         self.assertAlmostEqual(c_pie.allowed_all, 30.8, places=5)
         self.assertAlmostEqual(f_pie.allowed_all, 15.4, places=5)
+
+    def test_season_factor_is_all_over_league(self) -> None:
+        self.assertAlmostEqual(_season_factor(46.0, 44.4), 46.0 / 44.4, places=5)
+        self.assertIsNone(_season_factor(46.0, 0.0))
+        self.assertIsNone(_season_factor(None, 44.4))
+
+    def test_shrink_can_sit_below_one_when_this_season_is_above(self) -> None:
+        raw = _season_factor(46.0, 44.4)
+        shrunk = _shrink_factor(raw, 0.96, 3)
+        self.assertGreater(raw, 1.0)
+        self.assertLess(shrunk, raw)
 
     def test_shrink_blends_toward_prior(self) -> None:
         mixed = _shrink_factor(1.80, 1.0, 1)

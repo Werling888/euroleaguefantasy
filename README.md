@@ -78,7 +78,7 @@ You do not need to delete `data/cache` to pick up code changes. Sidebar **Refres
 
 - **Player board** — every player, with team, position, venue, minutes, sort, and (when the round spans more than one day) **Turn** (T1/T2/T3) filters. With official Fan ID prices, **Owned %** and a Differentials / template-risk expander (low-owned pickups vs highly owned players missing from My team). The Player column is pinned; any other column can be pinned too from its header menu.
 - **Matchup** — one club’s next game and how many fantasy points that defense allows.
-- **Best team** — a legal squad for the next round, one tip day, or the next 1–5 rounds. **Changes** picks how many new players come in; the **Mode** toggle next to it is Exact (bring in exactly that many) or Up to (Best team may use fewer if that scores just as well or better). **Start best team** runs from the selected saved team. **Trade one player** suggests same-position upgrades at or below that player’s price with a higher projection. After you save a new lineup on My team, press Start again; the old suggestion is not kept on screen. **Copy this squad** writes that lineup into My team.
+- **Best team** — a legal squad for the next round, one tip day, or the next 1–5 rounds. **Changes** picks how many new players come in; the **Mode** toggle next to it is Exact (bring in exactly that many) or Up to (Best team may use fewer if that scores just as well or better). **Start best team** runs from the selected saved team. **Coming in** and **Going out** use the same player-board columns. **Trade one player** suggests same-position upgrades at or below that player’s price with a higher projection. After you save a new lineup on My team, press Start again; the old suggestion is not kept on screen. **Copy this squad** writes that lineup into My team.
 - **My team** — your own lineup, saved in `data/squad.json`. Optional **Import from Fantasy Challenge** pulls the official lineup for your Fan ID into the selected saved team (overwrite only when you confirm).
 
 Roster rules: 4 guards, 4 forwards, 2 centers, and the credits you type on Best team (100 in Fantasy Challenge), at most 6 players from one club. Best team spends leftover credits on a same-position upgrade when that does not lose projected points. Starters, the sixth man, and the coach count in full. The bench counts at half. One starter is captain and counts double. Starting shapes are 2-2-1, 1-2-2, 2-1-2, 1-3-1, and 3-1-1 (guards-forwards-centers).
@@ -107,9 +107,9 @@ Green is the top third of the league, yellow the middle, red the bottom. Volatil
 - **Opponent** — next rival.
 - **H/A** — Home or Away.
 - **Win %** — chance the club wins the next game.
-- **Opp factor** — game pie versus the league, pulled toward last season until a few games are in. Above 1 is an easier matchup.
+- **Opp factor** — game pie versus the league, pulled toward last season until a few games are in (Matchup **vs last yr**; used in Projected). Above 1 is an easier matchup.
 - **Form** — 2026-27 if he has played this season, 2025-26 if not.
-- **L3 / L5 / L10 / ALL / League / Factor** — Matchup table. ALL is total G, F, or C fantasy allowed in a game. Factor is that versus the league, shrunk early in the season.
+- **L3 / L5 / L10 / ALL / League / Factor / vs last yr** — Matchup table. ALL is total G, F, or C fantasy allowed in a game. Factor is ALL / League this season. vs last yr is that ratio pulled toward last season. Colors compare the same position across clubs, with a wider yellow band than the player board.
 - **Slot** — Captain (double), Starter or Sixth (full), or Bench (half).
 - **Counted** — Projected times the slot multiplier.
 - **Coach price** — from the official Fantasy Challenge list when credentials are configured.
@@ -140,7 +140,7 @@ Each user of this repo must create their own `data/fantasy_credentials.propertie
 
 If the file is missing, Best team falls back to the public givemestats list for **players** only (opening prices). Coach credits and your Fantasy bank need the Fan ID login.
 
-After a successful official refresh, **Best team** prefills coach credits from the Fantasy list, the **Credits** budget from your Fantasy Challenge bank (players + coach value), and **Changes** from your remaining free trades. You can still edit any of those.
+After a successful official refresh, **Best team** prefills coach credits from the Fantasy list, the **Credits** budget from your Fantasy Challenge bank (players + coach value), and **Changes** from your remaining free trades. You can still edit any of those. **Import from Fantasy Challenge** on My team copies the official lineup only; it does not set player prices or the bank.
 
 ## Data
 

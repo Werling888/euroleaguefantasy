@@ -246,6 +246,20 @@ def _defense_profiles(logs: pd.DataFrame):
     return profiles, league, games, prior_league, prior_allowed
 
 
+def _season_factor(allowed: float | None, league: float | None) -> float | None:
+    """This-season pie versus the league pie. Not shrunk toward last season."""
+    if allowed is None or league is None:
+        return None
+    try:
+        base = float(league)
+        pie = float(allowed)
+    except (TypeError, ValueError):
+        return None
+    if base <= 0 or pd.isna(base) or pd.isna(pie):
+        return None
+    return pie / base
+
+
 def _shrink_factor(current: float | None, prior: float | None, games: int) -> float:
     center = 1.0 if prior is None else float(prior)
     if current is None:
@@ -673,6 +687,7 @@ def build_dashboard(cache: dict[str, pd.DataFrame], season: str | None = None) -
                     "position_group": position,
                     "league_allowed": league_avg,
                     "opp_factor": factor,
+                    "opp_factor_raw": _season_factor(allowed_all, league_avg),
                     "opp_allowed": allowed_all,
                     "l3": l3,
                     "l5": l5,

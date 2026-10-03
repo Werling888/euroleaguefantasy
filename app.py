@@ -21,7 +21,7 @@ from src.injuries import ensure_injuries, injury_cache_path
 from src.optimize import _apply_horizon, _pid, build_best_team, slate_days
 from src.trades import suggest_trade_upgrades, trade_records
 from src.ownership import DIFFERENTIAL_MAX, TEMPLATE_MIN, differentials
-from src.project import FORM_GAMES, build_dashboard
+from src.project import FORM_GAMES, _season_factor, build_dashboard
 from src.squad import (
     BUDGET,
     create_team,
@@ -102,7 +102,7 @@ PLAYER_COLUMNS = [
     "**Opponent** — next rival.",
     "**H/A** — Home or Away for that game.",
     "**Win %** — chance the club wins the next game.",
-    "**Opp factor** — this team's G/F/C game total versus the league game total, pulled toward last season until a few games are in. Above 1 is easier. Four centers share one C pie; they do not each get the starter's night.",
+    "**Opp factor** — this opponent's G/F/C game pie versus the league, pulled toward last season until a few games are in (same as Matchup vs last yr). Above 1 is easier. Four centers share one C pie; they do not each get the starter's night.",
     "**Form** — where the baseline comes from: 2025-26, 2026-27, or Pos. avg when the player has no history. After one game this season, Form is this season.",
     "**Turn** — only shown when the slate has more than one tip day. T1 is the first day, T2 the next, T3 if there is one. Filters the board to players whose next game is on that day.",
 ]
@@ -119,9 +119,10 @@ MATCHUP_COLUMNS = [
     "**Next opponent** — the club and whether the game is home or away.",
     "**Tip** — start time in Athens.",
     "**Win chance** — same idea as Win %.",
-    "**L3 / L5 / L10 / ALL** — average fantasy this defense allowed to the whole G, F, or C group in a game this season (the pie). After 1 game they match. Factor uses ALL versus League, shrunk toward last season.",
+    "**L3 / L5 / L10 / ALL** — average fantasy this defense allowed to the whole G, F, or C group in a game this season (the pie). After 1 game they match.",
     "**League** — league average of those game pies at that position.",
-    "**Factor** — ALL divided by League, pulled toward last season. Used in Projected. Above 1 is an easier matchup.",
+    "**Factor** — ALL divided by League this season. Above 1 is easier. Colors compare the same position across clubs (G vs G), with a wider yellow band than the player board.",
+    "**vs last yr** — Factor pulled toward last season. That is the mix used in Projected while games are few.",
 ]
 BEST_COLUMNS = [
     "**Slate** — the full next round, or only the clubs that play on the chosen day.",
@@ -133,11 +134,11 @@ BEST_COLUMNS = [
     "**Mode** — Exact brings in that many new players. Up to lets Best team use fewer than that if a smaller change scores just as well or better.",
     "**Include coach in changes** — checked: Best team may pick a different priced coach. Unchecked: the coach from the selected saved team stays.",
     "**Move** — Keep means the player is already on the selected saved team. New means they are not.",
-    "**Credits** — squad budget, coach included. Prefills from your Fantasy Challenge bank when the official login is configured. Player prices plus the coach price must stay inside that number.",
+    "**Credits** — squad budget, coach included. Prefills from your Fantasy Challenge bank after Refresh data with Fan ID (not from Import). Player prices come from that same official list. Import on My team only copies the lineup.",
     "**Formation (G-F-C)** — guards, forwards, and centers in the starting five. Legal shapes are 2-2-1, 1-2-2, 2-1-2, 1-3-1, and 3-1-1.",
     "**Status** — only Available players are chosen. Out and unconfirmed players are left out.",
     "**Note** — why a player on the left-out list is not confirmed.",
-    "**Coming in / Going out** — after the suggestion, compared with the Saved team you have selected. Coming in is new to that team. Going out is on that team and not in the suggestion, including a coach change.",
+    "**Coming in / Going out** — after the suggestion, compared with the Saved team you have selected. Both tables use the same player-board columns. Coming in is new to that team. Going out is on that team and is not in the suggestion, including a coach change.",
     "**Slot** — Captain counts double, Starter and Sixth count in full, Bench counts at half.",
     "**Day** — tip day in Athens. **Turn** is T1, T2, or T3. At most six of the ten can be T1 when a later day exists, so those players can replace a low T1 score. A one-day slate has only T1.",
     "**Form** — 2026-27 if he has played this season, 2025-26 if not. Best team uses that same mix; there is no season button.",
@@ -182,7 +183,12 @@ def _owned_label(value) -> str | None:
     return f"{float(value) * 100:.0f}%"
 
 
-def _bands(frame: pd.DataFrame, columns: list[str]) -> dict[str, tuple[float, float]]:
+def _bands(
+    frame: pd.DataFrame,
+    columns: list[str],
+    low_q: float = 0.33,
+    high_q: float = 0.66,
+) -> dict[str, tuple[float, float]]:
     bands = {}
     for column in columns:
         if column not in frame.columns:
@@ -190,8 +196,41 @@ def _bands(frame: pd.DataFrame, columns: list[str]) -> dict[str, tuple[float, fl
         series = pd.to_numeric(frame[column], errors="coerce").dropna()
         if series.empty:
             continue
-        bands[column] = (float(series.quantile(0.33)), float(series.quantile(0.66)))
+        bands[column] = (float(series.quantile(low_q)), float(series.quantile(high_q)))
     return bands
+
+
+def _color_by_position(source: pd.DataFrame, defense: pd.DataFrame, key: str) -> list[str]:
+    """Green/yellow/red within the same G/F/C row, using 25/75 cuts (wider yellow)."""
+    pos_bands: dict[str, tuple[float, float]] = {}
+    for position in POSITIONS:
+        subset = defense[defense["position_group"] == position] if "position_group" in defense.columns else defense
+        bands = _bands(subset, [key], 0.25, 0.75)
+        if key in bands:
+            pos_bands[position] = bands[key]
+    styles = []
+    values = pd.to_numeric(source[key], errors="coerce") if key in source.columns else pd.Series(dtype=float)
+    positions = source["position_group"] if "position_group" in source.columns else pd.Series([None] * len(source))
+    for value, position in zip(values, positions):
+        if value is None or pd.isna(value) or position not in pos_bands:
+            styles.append("")
+            continue
+        low, high = pos_bands[position]
+        number = float(value)
+        styles.append(GOOD if number >= high else BAD if number <= low else MID)
+    return styles
+
+
+def _paint_matchup(view: pd.DataFrame, source: pd.DataFrame, defense: pd.DataFrame, columns: dict[str, str]):
+    styler = view.style
+    for key, display in columns.items():
+        if display not in view.columns or key not in source.columns:
+            continue
+        colors = _color_by_position(source, defense, key)
+        if len(colors) != len(view):
+            continue
+        styler = styler.apply(lambda _column, colors=colors: colors, subset=[display])
+    return styler
 
 
 def _color_values(values, low: float, high: float, higher: bool) -> list[str]:
@@ -347,6 +386,7 @@ def _board_view(frame: pd.DataFrame) -> pd.DataFrame:
         ("points_per_credit", 2),
         ("floor", 1),
         ("ceiling", 1),
+        ("counted", 1),
     ):
         if column in view:
             view[column] = view[column].map(lambda value, digits=digits: _round(value, digits))
@@ -357,6 +397,7 @@ def _board_view(frame: pd.DataFrame) -> pd.DataFrame:
     if "ownership" in view.columns:
         view["ownership"] = view["ownership"].map(_owned_label)
     rename = {
+        "slot": "Slot",
         "player_name": "Player",
         "team_name": "Team",
         "position_group": "Pos",
@@ -374,6 +415,7 @@ def _board_view(frame: pd.DataFrame) -> pd.DataFrame:
         "ownership": "Owned %",
         "points_per_credit": "Points per credit",
         "projected": "Projected",
+        "counted": "Counted",
         "floor": "Floor",
         "ceiling": "Ceiling",
         "opponent_name": "Opponent",
@@ -381,6 +423,7 @@ def _board_view(frame: pd.DataFrame) -> pd.DataFrame:
         "win_prob": "Win %",
         "opp_factor": "Opp factor",
         "form_source": "Form",
+        "move": "Move",
     }
     keep = [column for column in rename if column in view.columns]
     view = view[keep].rename(columns=rename)
@@ -522,7 +565,7 @@ def _page_matchup(data) -> None:
     st.subheader("Matchup")
     st.caption(
         "One club’s next game. Opponent G/F/C allowed is the fantasy that whole position scored in a game "
-        "(this season). Factor is that pie versus the league, pulled toward last season while games are few."
+        "(this season). Factor is ALL versus League this season. vs last yr is that ratio pulled toward last season, and is what Projected uses."
     )
     _show_columns(MATCHUP_COLUMNS + PLAYER_COLUMNS + COACH_COLUMNS)
     if data.defense.empty:
@@ -536,7 +579,13 @@ def _page_matchup(data) -> None:
     labels = {row.team_name: row.team_code for row in teams.itertuples(index=False)}
     team_name = st.selectbox("Team", list(labels), key="matchup_team")
     team_code = labels[team_name]
-    defense = data.defense[data.defense["team_code"] == team_code]
+    league_defense = data.defense.copy()
+    if "opp_factor_raw" not in league_defense.columns:
+        league_defense["opp_factor_raw"] = [
+            _season_factor(allowed, league)
+            for allowed, league in zip(league_defense["opp_allowed"], league_defense["league_allowed"])
+        ]
+    defense = league_defense[league_defense["team_code"] == team_code]
     if defense.empty:
         st.info("This team has no upcoming game in the cached schedule.")
         return
@@ -546,13 +595,22 @@ def _page_matchup(data) -> None:
     left.metric("Next opponent", f"{first['opponent_name']} ({first['home_away']})")
     middle.metric("Tip", date)
     right.metric("Win chance", f"{float(first['win_prob']):.0%}")
-    table = defense[
-        ["position_group", "l3", "l5", "l10", "opp_allowed", "league_allowed", "opp_factor"]
-    ].copy()
+    keep_cols = [
+        "position_group",
+        "l3",
+        "l5",
+        "l10",
+        "opp_allowed",
+        "league_allowed",
+        "opp_factor_raw",
+        "opp_factor",
+    ]
+    table = defense[keep_cols].copy()
     numeric = table.copy()
     for column in ("l3", "l5", "l10", "opp_allowed", "league_allowed"):
         table[column] = table[column].map(lambda value: _round(value, 1))
-    table["opp_factor"] = table["opp_factor"].map(lambda value: _round(value, 2))
+    for column in ("opp_factor_raw", "opp_factor"):
+        table[column] = table[column].map(lambda value: _round(value, 2))
     table = table.rename(
         columns={
             "position_group": "Pos",
@@ -561,23 +619,31 @@ def _page_matchup(data) -> None:
             "l10": "L10",
             "opp_allowed": "ALL",
             "league_allowed": "League",
-            "opp_factor": "Factor",
+            "opp_factor_raw": "Factor",
+            "opp_factor": "vs last yr",
         }
     )
-    defense_bands = _bands(data.defense, ["opp_allowed", "opp_factor"])
-    painted = _paint(
+    painted = _paint_matchup(
         table,
-        numeric.rename(columns={"opp_allowed": "opp_allowed", "opp_factor": "opp_factor"}),
-        defense_bands,
-        {"opp_allowed": "ALL", "opp_factor": "Factor"},
+        numeric,
+        league_defense,
+        {
+            "l3": "L3",
+            "l5": "L5",
+            "l10": "L10",
+            "opp_allowed": "ALL",
+            "opp_factor_raw": "Factor",
+            "opp_factor": "vs last yr",
+        },
     )
     st.dataframe(painted, hide_index=True, width="stretch")
     games = int(first["defense_games"]) if "defense_games" in first.index else 0
     st.caption(
         "Same idea as a game pie, not a starter cloned onto every player: ALL is total G, F, or C fantasy "
-        "allowed in a game this season. L3/L5/L10 are the last 3/5/10 games. Factor is ALL versus the league, "
-        f"shrunk toward last season ({games} games for this opponent). Four centers share the C pie. "
-        + COLOR_NOTE
+        "allowed in a game this season. L3/L5/L10 are the last 3/5/10 games. Factor is ALL / League this season. "
+        f"vs last yr is that ratio pulled toward last season ({games} games for this opponent) and is used in Projected. "
+        "Four centers share the C pie. Colors compare the same position across clubs; yellow is the middle half "
+        "(25th–75th percentile). Price is not colored."
     )
     coach = _coaches_for(data.coaches, team_code)
     if not coach.empty:
@@ -999,6 +1065,24 @@ def _mark_moves(players: pd.DataFrame, saved_ids: list[str]) -> pd.DataFrame:
     return frame
 
 
+def _board_with_suggestion(suggestion: pd.DataFrame, projections: pd.DataFrame) -> pd.DataFrame:
+    """Projection-board rows for suggestion players, plus Slot / Counted / Move when present."""
+    if suggestion is None or suggestion.empty or projections is None or projections.empty:
+        return pd.DataFrame()
+    ids = set(suggestion["player_id"].map(_pid))
+    board = projections[projections["player_id"].map(_pid).isin(ids)].copy()
+    extra_cols = [column for column in ("slot", "counted", "move") if column in suggestion.columns]
+    if extra_cols:
+        extras = suggestion.copy()
+        extras["_pid"] = extras["player_id"].map(_pid)
+        extras = extras.drop_duplicates("_pid").set_index("_pid")
+        board["_pid"] = board["player_id"].map(_pid)
+        for column in extra_cols:
+            board[column] = board["_pid"].map(extras[column])
+        board = board.drop(columns=["_pid"])
+    return board.sort_values("projected", ascending=False, na_position="last")
+
+
 def _show_squad_diff(
     team_name: str,
     saved: dict,
@@ -1032,7 +1116,8 @@ def _show_squad_diff(
             st.caption("Nobody new.")
         else:
             if not coming.empty:
-                st.dataframe(_best_view(coming), hide_index=True, width="stretch")
+                coming_board = _board_with_suggestion(coming, projections)
+                st.dataframe(_styled_board(coming_board, projections), width="stretch")
             if coach_changed and result.get("coach_name"):
                 st.caption(
                     f"Coach in: {result['coach_name']} ({result.get('coach_team') or ''}) "
@@ -1055,7 +1140,7 @@ def _show_squad_diff(
                 st.caption(f"Coach out: {label}.")
     st.caption(
         f"Coming in is not on {team_name}. Going out is on {team_name} and is not in this suggestion. "
-        "Press Use to rebuild from that team with a change limit."
+        "Both tables use the same columns as the player board."
     )
 
 
@@ -1262,6 +1347,7 @@ def _page_best(data) -> None:
     st.subheader("Best team")
     st.caption(
         "Type the credits you have. Ten players are chosen from published prices, and the coach is chosen the same way among coaches with typed credits. "
+        "Player prices and the Credits bank come from Refresh data with your Fan ID, not from Import. Import on My team only copies the saved lineup. "
         "Select a saved team to see who would come in and who would go out after the suggestion. "
         "Each round's projection already includes that opponent, home or away, and win chance (the same matchup used on Matchup). Opponent G/F/C is the game pie versus the league, not one star cloned onto every player. "
         "A player who has played this season is scored from this season only. Last season is used only when he has no game yet. "
@@ -1312,11 +1398,11 @@ def _page_best(data) -> None:
             max_value=200.0,
             step=0.5,
             key="best_budget",
-            help="Full squad budget including the coach. Prefills from your Fantasy Challenge bank when the official login is configured.",
+            help="Full squad budget including the coach. Prefills from your Fantasy Challenge bank after Refresh data with Fan ID. Import does not set this.",
         )
         if bank_value is not None:
             bank_name = price_meta.get("team_bank_name") or "Fantasy Challenge"
-            st.caption(f"Bank from {bank_name}: {bank_value:.1f} (players + coach).")
+            st.caption(f"Bank from {bank_name}: {bank_value:.1f} (players + coach). Refresh data loads this. Import does not.")
     with round_col:
         horizon = st.selectbox("Rounds", [1, 2, 3, 4, 5], index=0, key="best_rounds")
     credits = load_credits(ROOT)
@@ -1686,7 +1772,7 @@ def _cache_token() -> tuple[float, ...]:
         price_cache_path(ROOT),
         injury_cache_path(ROOT),
     ]
-    return tuple(path.stat().st_mtime if path.exists() else 0.0 for path in paths) + (float(FORM_GAMES), 13.0)
+    return tuple(path.stat().st_mtime if path.exists() else 0.0 for path in paths) + (float(FORM_GAMES), 14.0)
 
 
 @st.cache_data(show_spinner=False)
