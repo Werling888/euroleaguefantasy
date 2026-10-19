@@ -19,9 +19,21 @@ from src.official import change_radio_options, suggested_changes_label
 from src.prices import ensure_prices, load_price_meta, map_coach_prices, price_cache_path
 from src.injuries import ensure_injuries, injury_cache_path
 from src.optimize import _apply_horizon, _pid, build_best_team, slate_days
+from src.past_matches import opponent_high_scores, position_highs, window_limit
 from src.trades import suggest_trade_upgrades, trade_records
 from src.ownership import DIFFERENTIAL_MAX, TEMPLATE_MIN, differentials
-from src.project import FORM_GAMES, _season_factor, build_dashboard
+from src.project import (
+    CURRENT_SEASON,
+    FORM_GAMES,
+    PRIOR_SEASON,
+    _means_from_pies,
+    _played_regular,
+    _position_game_pies,
+    _season_factor,
+    build_dashboard,
+)
+from src.prices import apply_fantasy_positions, apply_fantasy_positions_to_logs
+from src.roster_overrides import apply_roster_overrides
 from src.squad import (
     BUDGET,
     create_team,
@@ -149,6 +161,21 @@ BEST_COLUMNS = [
     "**Price** and **Points per credit** — published credits, and Fpts/g divided by that price.",
     "**Owned %** — share of managers who own him (official Fan ID list). Blank without official prices.",
     "**Trade one player** — same-position upgrades at or below his price; sorted by +Counted for his My team slot (captain 2×, bench 0.5×). Needs at least +1.0 projected and +0.5 counted. Shows bank freed when the pick is cheaper.",
+]
+PAST_COLUMNS = [
+    "**Against** — the club you are checking. Everyone in the tables scored against them.",
+    "**Matches back** — All is every regular-season game this season at the venue you picked. 5, 3, and 1 keep only that many most recent home games, away games, or games of either. **Next**, under that control, is Against's upcoming game: opponent, home or away, tip time in Athens, and win chance.",
+    "**Venue** — Home, Away, or Both. That is where Against played.",
+    "**Played** — the club that faced Against. **H/A**, **Score**, and **Result** are for Against. Score lists Against first. Result is Won or Lost.",
+    "**Top G / Top F / Top C** — the player at that position with the highest fantasy against Against in that game. Fantasy is PIR, or PIR plus 10% when his club won.",
+    "**Avg** — total fantasy that position scored against Against in the games shown, divided by how many games are shown. A game with nobody at that position counts as zero. That is the same game pie as Matchup.",
+    "**League** — the average game pie at that position for every club this season, home and away together.",
+    "**Factor** — Avg divided by League. Above 1 means opponents scored more against this club than in a typical game. Colors compare the same position across clubs for this venue and window. Yellow is the middle half.",
+    "**Player** — someone who played minutes against Against. Highest fantasy is first. The same player appears again if the clubs met twice.",
+    "**Team** on a player row — his club, the side that scored on Against.",
+    "**Pos** — G, F, or C from the Fantasy Challenge list, the same slot as the player board.",
+    "**H/A** on a player row — where he played. **Min** is his minutes in that game. **Fpts** is his fantasy score in that game. **Price** is his current Fantasy Challenge cost.",
+    "**Fpts** on this page is red when it is below the whole number of his price, yellow from that whole number up to 1.1 times his price, and green when it is higher than that. A price of 11.9 and a score of 11 is yellow. A missing price is not colored.",
 ]
 SQUAD_COLUMNS = [
     "**Status** — Available, a yellow unconfirmed status, or Out. Best team will not use anyone who is not Available.",
@@ -655,6 +682,255 @@ def _page_matchup(data) -> None:
         players = players[players["position_group"] == position]
     players = players.sort_values("points_per_credit", ascending=False, na_position="last")
     st.dataframe(_styled_board(players, data.projections), width="stretch")
+
+
+def _past_games_view(games: pd.DataFrame, lines: pd.DataFrame) -> pd.DataFrame:
+    highs = position_highs(lines)
+
+    def top(game_code, position: str) -> str | None:
+        hit = highs[(highs["game_code"] == game_code) & (highs["position_group"] == position)]
+        if hit.empty:
+            return None
+        row = hit.iloc[0]
+        return f"{row.player_name} ({_round(row.fantasy, 1)})"
+
+    rows = []
+    for game in games.itertuples(index=False):
+        when = pd.to_datetime(game.date, utc=True, errors="coerce")
+        date = None if pd.isna(when) else when.tz_convert("Europe/Athens").strftime("%d %b %Y")
+        rows.append(
+            {
+                "Round": None if pd.isna(game.round) else int(game.round),
+                "Date": date,
+                "Played": game.opponent_name,
+                "H/A": "Home" if bool(game.is_home) else "Away",
+                "Score": f"{int(game.team_score)}–{int(game.opp_score)}",
+                "Result": "Won" if game.team_score > game.opp_score else "Lost" if game.team_score < game.opp_score else "Tie",
+                "Top G": top(game.game_code, "G"),
+                "Top F": top(game.game_code, "F"),
+                "Top C": top(game.game_code, "C"),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _past_player_view(lines: pd.DataFrame) -> pd.DataFrame:
+    view = lines.copy()
+    dates = pd.to_datetime(view["date"], utc=True, errors="coerce").dt.tz_convert("Europe/Athens")
+    view["Date"] = dates.dt.strftime("%d %b %Y")
+    view["H/A"] = view["is_home"].map(lambda value: "Home" if bool(value) else "Away")
+    view["Min"] = view["minutes"].map(lambda value: _round(value, 1))
+    view["Fpts"] = view["fantasy"].map(lambda value: _round(value, 1))
+    if "price" in view.columns:
+        view["Price"] = view["price"].map(lambda value: _round(value, 1))
+    view["Round"] = view["round"].map(lambda value: None if pd.isna(value) else int(value))
+    view = view.rename(columns={"player_name": "Player", "team_name": "Team"})
+    keep = ["Player", "Team", "Round", "Date", "H/A", "Min", "Fpts"]
+    if "Price" in view.columns:
+        keep.append("Price")
+    return view[keep]
+
+
+def _position_averages(lines: pd.DataFrame, games: pd.DataFrame) -> dict[str, float | None]:
+    """Mean G/F/C fantasy per game. A missing position in a game counts as zero."""
+    if games is None or games.empty:
+        return {"G": None, "F": None, "C": None}
+    totals = {"G": 0.0, "F": 0.0, "C": 0.0}
+    if lines is not None and not lines.empty:
+        for position, group in lines.groupby("position_group"):
+            key = str(position)
+            if key in totals:
+                totals[key] = float(group["fantasy"].sum())
+    count = len(games)
+    return {position: totals[position] / count for position in totals}
+
+
+def _select_venue(games: pd.DataFrame, lines: pd.DataFrame, venue: str, limit: int | None):
+    """Home, Away, or both, newest first, then the matches-back limit."""
+    if games is None or games.empty:
+        return games, lines
+    chosen = games
+    if venue == "Home":
+        chosen = games[games["is_home"] == True]  # noqa: E712
+    elif venue == "Away":
+        chosen = games[games["is_home"] == False]  # noqa: E712
+    if limit is not None:
+        chosen = chosen.head(max(int(limit), 0))
+    chosen = chosen.reset_index(drop=True)
+    if lines is None or lines.empty:
+        return chosen, lines
+    kept = lines[lines["game_code"].isin(set(chosen["game_code"]))].reset_index(drop=True)
+    return chosen, kept
+
+
+def _league_pies(logs: pd.DataFrame) -> dict:
+    """This season's average G/F/C game pie."""
+    if logs is None or logs.empty:
+        return {}
+    league, _allowed = _means_from_pies(_position_game_pies(logs, CURRENT_SEASON))
+    return league
+
+
+def _club_norms(logs: pd.DataFrame, team_codes: list[str], venue: str, limit: int | None) -> pd.DataFrame:
+    """Avg, League, and Factor for every club at this venue and window."""
+    league = _league_pies(logs)
+    rows = []
+    for team_code in team_codes:
+        games, lines = opponent_high_scores(logs, team_code, CURRENT_SEASON, None)
+        games, lines = _select_venue(games, lines, venue, limit)
+        if games.empty:
+            continue
+        averages = _position_averages(lines, games)
+        for position in POSITIONS:
+            rows.append(
+                {
+                    "team_code": team_code,
+                    "position_group": position,
+                    "avg": averages[position],
+                    "league": league.get(position),
+                    "factor": _season_factor(averages[position], league.get(position)),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _norms_view(frame: pd.DataFrame) -> pd.DataFrame:
+    view = frame.copy()
+    view["Pos"] = view["position_group"]
+    view["Avg"] = view["avg"].map(lambda value: _round(value, 1))
+    view["League"] = view["league"].map(lambda value: _round(value, 1))
+    view["Factor"] = view["factor"].map(lambda value: _round(value, 2))
+    return view[["Pos", "Avg", "League", "Factor"]]
+
+
+def _show_next_matchup(data, team_code: str) -> None:
+    """Against's upcoming game: opponent, venue, tip, and win chance."""
+    defense = data.defense
+    rows = defense[defense["team_code"] == team_code] if defense is not None and not defense.empty else defense
+    if rows is None or rows.empty:
+        st.caption("No upcoming game.")
+        return
+    first = rows.iloc[0]
+    when = pd.to_datetime(first["game_date"], utc=True, errors="coerce")
+    date = "" if pd.isna(when) else when.tz_convert("Europe/Athens").strftime("%d %b %H:%M")
+    win = first["win_prob"]
+    chance = "" if win is None or pd.isna(win) else f"Win {float(win):.0%}"
+    st.metric("Next", f"{first['opponent_name']} ({first['home_away']})")
+    st.caption(" · ".join(part for part in (date, chance) if part))
+
+
+def _fpts_cost_band(points, cost) -> str | None:
+    """Red below the whole number of his price, yellow through 1.1 times it, green above that."""
+    if points is None or cost is None or pd.isna(points) or pd.isna(cost):
+        return None
+    scored = float(points)
+    price = float(cost)
+    if scored < int(price):
+        return "red"
+    if scored <= price * 1.1:
+        return "yellow"
+    return "green"
+
+
+def _with_price(lines: pd.DataFrame, projections: pd.DataFrame) -> pd.DataFrame:
+    frame = lines.copy()
+    frame["price"] = pd.NA
+    if frame.empty or "player_id" not in frame.columns:
+        return frame
+    if projections is None or projections.empty or "price" not in projections.columns:
+        return frame
+    prices = projections.drop_duplicates("player_id")
+    lookup = dict(zip(prices["player_id"].astype(str), prices["price"]))
+    frame["price"] = frame["player_id"].astype(str).map(lookup)
+    return frame
+
+
+def _styled_past(lines: pd.DataFrame):
+    view = _past_player_view(lines)
+    if lines.empty or "Fpts" not in view.columns:
+        return view
+    costs = lines["price"] if "price" in lines.columns else pd.Series(pd.NA, index=lines.index)
+    paint = {"red": BAD, "yellow": MID, "green": GOOD}
+    colors = [_fpts_cost_band(points, cost) for points, cost in zip(lines["fantasy"], costs)]
+    styles = [paint.get(band, "") for band in colors]
+    return view.style.apply(lambda _column, styles=styles: styles, subset=["Fpts"])
+
+
+def _page_past(data) -> None:
+    st.subheader("Previous matchups")
+    st.caption(
+        "Against is the club opponents scored on. Pick home or away, and how far back to look. "
+        "Avg is the game pie for those games. Factor divides it by the league pie. "
+        "A win is PIR plus 10%; a loss is PIR."
+    )
+    _show_columns(PAST_COLUMNS)
+    teams = (
+        data.projections[["team_code", "team_name"]]
+        .drop_duplicates()
+        .sort_values("team_name")
+    )
+    if teams.empty:
+        st.info("No clubs are on the roster yet.")
+        return
+    labels = {row.team_name: row.team_code for row in teams.itertuples(index=False)}
+    pick_col, side_col = st.columns([3, 1])
+    with pick_col:
+        team_col, venue_col = st.columns(2)
+        with team_col:
+            team_name = st.selectbox("Against", list(labels), key="past_team")
+        with venue_col:
+            venue = st.selectbox("Venue", ["Both", "Home", "Away"], key="past_venue")
+    with side_col:
+        window = st.radio("Matches back", ["All", "5", "3", "1"], horizontal=True, key="past_window")
+        _show_next_matchup(data, labels[team_name])
+    logs = _load_played_logs(_cache_token())
+    team_code = labels[team_name]
+    games, lines = opponent_high_scores(logs, team_code, data.current_season, None)
+    games, lines = _select_venue(games, lines, venue, window_limit(window))
+    if games.empty:
+        place = {"Home": "home", "Away": "away"}.get(venue, "")
+        where = f"{place} " if place else ""
+        st.info(
+            f"Nothing has been scored against {team_name} in {where}regular-season games in {FORM_LABELS.get(data.current_season, data.current_season)}."
+        )
+        return
+    st.markdown(f"Games against **{team_name}**")
+    st.dataframe(_past_games_view(games, lines), hide_index=True, width="stretch")
+    count = len(games)
+    st.caption(
+        f"{count} game{'' if count == 1 else 's'} against {team_name}. "
+        "Played is who faced them. H/A, Score, and Result are for the against club. Score lists them first. Result is Won or Lost. "
+        "Top G, Top F, and Top C are who scored the most at that position on them."
+    )
+    norms = _club_norms(logs, list(labels.values()), venue, window_limit(window))
+    shown = norms[norms["team_code"] == team_code] if not norms.empty else norms
+    if not shown.empty:
+        st.markdown(f"Allowed against **{team_name}**, compared with the league")
+        painted = _paint_matchup(
+            _norms_view(shown),
+            shown,
+            norms,
+            {"avg": "Avg", "factor": "Factor"},
+        )
+        st.dataframe(painted, hide_index=True, width="stretch")
+        st.caption(
+            f"Avg is total G, F, or C fantasy scored on {team_name} in these {count} "
+            f"game{'' if count == 1 else 's'}, divided by {count}. "
+            "League is that pie for every club this season. Factor is Avg / League. "
+            "Above 1 is an easier matchup. Colors compare the same position across clubs for this venue and window; "
+            "yellow is the middle half."
+        )
+    st.caption(
+        f"Players who scored against {team_name}. Fpts is red below the whole number of his price, "
+        "yellow from there up to 1.1 times his price, and green above that. A price of 11.9 and a score of 11 is yellow."
+    )
+    for position, title in (("G", "Guards"), ("F", "Forwards"), ("C", "Centers")):
+        st.subheader(title)
+        group = lines[lines["position_group"] == position] if not lines.empty else lines
+        if group.empty:
+            st.caption(f"No {title.lower()} scored against {team_name} in these games.")
+            continue
+        st.dataframe(_styled_past(_with_price(group, data.projections)), hide_index=True, width="stretch")
 
 
 def _page_squad(data) -> None:
@@ -1776,6 +2052,32 @@ def _cache_token() -> tuple[float, ...]:
 
 
 @st.cache_data(show_spinner=False)
+def _load_played_logs(token: tuple[float, ...]) -> pd.DataFrame:
+    """Box scores already stored under data/cache, tagged with Fantasy Challenge positions.
+
+    `token` is only the cache key, the same fingerprint as the dashboard.
+    """
+    _ = token
+    cache = load_cache(ROOT)
+    if cache is None:
+        return pd.DataFrame()
+    try:
+        prices = ensure_prices(ROOT)
+    except Exception:
+        prices = pd.DataFrame()
+    logs = _played_regular(cache["player_games"])
+    rosters = cache.get("rosters")
+    if logs.empty or rosters is None or rosters.empty:
+        return logs
+    players = rosters[(rosters["season_code"] == CURRENT_SEASON) & (rosters["role"] == "player")].copy()
+    if players.empty:
+        players = rosters[(rosters["season_code"] == PRIOR_SEASON) & (rosters["role"] == "player")].copy()
+    players = apply_roster_overrides(players, CURRENT_SEASON)
+    players = apply_fantasy_positions(players, prices)
+    return apply_fantasy_positions_to_logs(logs, players)
+
+
+@st.cache_data(show_spinner=False)
 def _load_dashboard(token: tuple[float, ...], season: str | None = None):
     """Load the cache, prices and injuries and build the projection.
 
@@ -1810,7 +2112,13 @@ def main() -> None:
         "Personal dashboard for the EuroLeague Fantasy Challenge. "
         "Stats come from the public Euroleague feeds. Player credits come from your Fantasy Challenge login when configured, otherwise the public list."
     )
-    page = st.sidebar.radio("Page", ["Player board", "Matchup", "Best team", "My team"], key="page")
+    if st.session_state.get("page") == "Past matches":
+        st.session_state["page"] = "Previous matchups"
+    page = st.sidebar.radio(
+        "Page",
+        ["Player board", "Matchup", "Previous matchups", "Best team", "My team"],
+        key="page",
+    )
     if st.sidebar.button("Refresh data", key="refresh"):
         note = st.empty()
         bar = st.progress(0.0)
@@ -1876,6 +2184,8 @@ def main() -> None:
         _page_board(data)
     elif page == "Matchup":
         _page_matchup(data)
+    elif page == "Previous matchups":
+        _page_past(data)
     elif page == "Best team":
         _page_best(data)
     else:
