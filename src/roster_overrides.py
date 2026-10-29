@@ -34,13 +34,16 @@ def apply_roster_overrides(
     existing = set()
     if not players.empty and "person_id" in players.columns:
         existing = set(players["person_id"].astype(str))
+    named = set()
+    if not players.empty and {"person_name", "team_code"} <= set(players.columns):
+        named = set(zip(players["person_name"].astype(str).str.lower(), players["team_code"].astype(str)))
     extras = []
     for row in rows:
         missing = [key for key in REQUIRED if not row.get(key)]
         if missing:
             raise ValueError(f"roster override missing {missing}: {row}")
         person_id = str(row["person_id"])
-        if person_id in existing:
+        if person_id in existing or (str(row["person_name"]).lower(), str(row["team_code"])) in named:
             continue
         extras.append(
             {
