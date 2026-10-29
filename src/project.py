@@ -279,6 +279,7 @@ def _opponent_factor(
     prior_league: dict[str, float] | None = None,
     prior_allowed: dict[tuple[str, str], float] | None = None,
 ) -> float:
+    """This season's pie versus the league once the opponent has a game. Last season only before that."""
     if position not in {"G", "F", "C"}:
         return 1.0
     prior_league = prior_league or {}
@@ -296,7 +297,7 @@ def _opponent_factor(
     prior_base = prior_league.get(position)
     prior = None if prior_raw is None or not prior_base else float(prior_raw) / float(prior_base)
     if n >= 1 and current is not None:
-        return _shrink_factor(current, prior, n)
+        return current
     if prior is not None:
         return _shrink_factor(None, prior, 0)
     return 1.0
@@ -514,7 +515,7 @@ def build_dashboard(cache: dict[str, pd.DataFrame], season: str | None = None) -
                     player.team_code, game["opponent_code"], game["is_home"]
                 )
                 # baseline is Fpts/g. factor is this team's G/F/C game pie versus
-                # the league pie, shrunk while few games are in. shot_factor nudges
+                # the league pie this season (last season only before its first game). shot_factor nudges
                 # for shot volume versus the position average, also shrunk early.
                 projected = baseline * factor * ratio * (1.0 + 0.10 * chance) * shot_factor
                 schedule.append(

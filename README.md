@@ -77,8 +77,8 @@ You do not need to delete `data/cache` to pick up code changes. Sidebar **Refres
 ## Pages
 
 - **Player board** — every player, with team, position, venue, minutes, sort, and (when the round spans more than one day) **Turn** (T1/T2/T3) filters. With official Fan ID prices, **Owned %** and a Differentials / template-risk expander (low-owned pickups vs highly owned players missing from My team). The Player column is pinned; any other column can be pinned too from its header menu.
-- **Matchup** — one club’s next game and how many fantasy points that defense allows.
-- **Previous matchups** — scores against one club (home, away, or both; all of this season, or the last 5, 3, or 1). **Next**, under Matches back, is that club's upcoming game. Players who scored on that club, split into guards, forwards, and centers. **Fpts** is red below the whole number of his price (11 against a price of 11.9 is yellow), yellow up to 1.1 times his price, and green above that. **Avg** is the position's game pie in those games. **Factor** divides it by the league pie.
+- **Next opponent** — pick your club: its next game, how that opponent defends each position, and your club's coach and players for that game.
+- **Opponent defense** — pick a club (**Defense of**) to see what every opponent scored against it (home, away, or both; all of this season, or the last 5, 3, or 1). **Next**, under Matches back, is that club's upcoming game. Players who scored on that club, split into guards, forwards, and centers. **Fpts** is red below the whole number of his price (11 against a price of 11.9 is yellow), yellow up to 1.1 times his price, and green above that. **Avg** is the position's game pie in those games. **Factor** divides it by the league pie.
 - **Best team** — a legal squad for the next round, one tip day, or the next 1–5 rounds. **Changes** picks how many new players come in; the **Mode** toggle next to it is Exact (bring in exactly that many) or Up to (Best team may use fewer if that scores just as well or better). **Start best team** runs from the selected saved team. **Coming in** and **Going out** use the same player-board columns. **Trade one player** suggests same-position upgrades at or below that player’s price with a higher projection. After you save a new lineup on My team, press Start again; the old suggestion is not kept on screen. **Copy this squad** writes that lineup into My team.
 - **My team** — your own lineup, saved in `data/squad.json`. Optional **Import from Fantasy Challenge** pulls the official lineup for your Fan ID into the selected saved team (overwrite only when you confirm).
 
@@ -103,14 +103,14 @@ Green is the top third of the league, yellow the middle, red the bottom. Volatil
 - **Price** — published Fantasy Challenge credits.
 - **Owned %** — share of Fantasy Challenge managers who own him (from the official Fan ID list). Blank when using the public price list.
 - **Points per credit** — Projected divided by Price.
-- **Projected** — expected fantasy points for the next game: Fpts/g times that opponent's G/F/C game pie versus the league (one star is the whole pie, not cloned onto every player; a one-game matchup is pulled toward last season), then home or away, a 10% win bonus weighted by win chance, and the Shots/g nudge. After one game this season, Fpts/g is this season only.
+- **Projected** — expected fantasy points for the next game: Fpts/g times that opponent's G/F/C game pie versus the league (one star is the whole pie, not cloned onto every player; this season's once the opponent has played one game), then home or away, a 10% win bonus weighted by win chance, and the Shots/g nudge. After one game this season, Fpts/g is this season only.
 - **Floor** / **Ceiling** — low and high outcomes from the last eight games, adjusted for the opponent.
 - **Opponent** — next rival.
 - **H/A** — Home or Away.
 - **Win %** — chance the club wins the next game.
-- **Opp factor** — game pie versus the league, pulled toward last season until a few games are in (Matchup **vs last yr**; used in Projected). Above 1 is an easier matchup.
+- **Opp factor** — game pie versus the league this season, the same as **Factor** on Next opponent (used in Projected and Best team). Last season only before the opponent's first game. Above 1 is an easier matchup.
 - **Form** — 2026-27 if he has played this season, 2025-26 if not.
-- **L3 / L5 / L10 / ALL / League / Factor / vs last yr** — Matchup table. ALL is total G, F, or C fantasy allowed in a game. Factor is ALL / League this season. vs last yr is that ratio pulled toward last season. Colors compare the same position across clubs, with a wider yellow band than the player board.
+- **L3 / L5 / L10 / ALL / League / Factor** — Next opponent table. ALL is total G, F, or C fantasy allowed in a game. Factor is ALL / League this season (last season's before the opponent's first game). Colors compare the same position across clubs, with a wider yellow band than the player board.
 - **Slot** — Captain (double), Starter or Sixth (full), or Bench (half).
 - **Counted** — Projected times the slot multiplier.
 - **Coach price** — from the official Fantasy Challenge list when credentials are configured.

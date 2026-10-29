@@ -109,12 +109,12 @@ PLAYER_COLUMNS = [
     "**Price** — Fantasy Challenge credits. The public list can lag the official game after a round. Type current credits on Best team.",
     "**Owned %** — share of Fantasy Challenge managers who own him (official Fan ID list only). Blank on the public price list.",
     "**Points per credit** — Fpts/g (the average of every game in the sample) divided by Price. One game of 10 is 10 per game. Two games of 10 and 30 is 20.",
-    "**Projected** — expected fantasy points for the next game: his Fpts/g times how much fantasy this opponent allows to all G, or all F, or all C in a game versus the league (one star C is the whole C pie, not cloned onto every center), times home or away, times a 10% win bonus weighted by Win %, times the Shots/g nudge. A one-game matchup is pulled toward last season.",
+    "**Projected** — expected fantasy points for the next game: his Fpts/g times how much fantasy this opponent allows to all G, or all F, or all C in a game versus the league (one star C is the whole C pie, not cloned onto every center), times home or away, times a 10% win bonus weighted by Win %, times the Shots/g nudge. The matchup is this season's once the opponent has played one game.",
     "**Floor** / **Ceiling** — low and high outcomes from the last eight games, adjusted for the opponent, then scaled if Exp min rose because of a teammate injury.",
     "**Opponent** — next rival.",
     "**H/A** — Home or Away for that game.",
     "**Win %** — chance the club wins the next game.",
-    "**Opp factor** — this opponent's G/F/C game pie versus the league, pulled toward last season until a few games are in (same as Matchup vs last yr). Above 1 is easier. Four centers share one C pie; they do not each get the starter's night.",
+    "**Opp factor** — this opponent's G/F/C game pie versus the league this season, the same as Factor on Next opponent. Last season is used only before the opponent's first game. Above 1 is easier. Four centers share one C pie; they do not each get the starter's night.",
     "**Form** — where the baseline comes from: 2025-26, 2026-27, or Pos. avg when the player has no history. After one game this season, Form is this season.",
     "**Turn** — only shown when the slate has more than one tip day. T1 is the first day, T2 the next, T3 if there is one. Filters the board to players whose next game is on that day.",
 ]
@@ -133,8 +133,7 @@ MATCHUP_COLUMNS = [
     "**Win chance** — same idea as Win %.",
     "**L3 / L5 / L10 / ALL** — average fantasy this defense allowed to the whole G, F, or C group in a game this season (the pie). After 1 game they match.",
     "**League** — league average of those game pies at that position.",
-    "**Factor** — ALL divided by League this season. Above 1 is easier. Colors compare the same position across clubs (G vs G), with a wider yellow band than the player board.",
-    "**vs last yr** — Factor pulled toward last season. That is the mix used in Projected while games are few.",
+    "**Factor** — ALL divided by League this season, used in Projected and Best team. Before the opponent's first game it is last season's. Above 1 is easier. Colors compare the same position across clubs (G vs G), with a wider yellow band than the player board.",
 ]
 BEST_COLUMNS = [
     "**Slate** — the full next round, or only the clubs that play on the chosen day.",
@@ -163,16 +162,16 @@ BEST_COLUMNS = [
     "**Trade one player** — same-position upgrades at or below his price; sorted by +Counted for his My team slot (captain 2×, bench 0.5×). Needs at least +1.0 projected and +0.5 counted. Shows bank freed when the pick is cheaper.",
 ]
 PAST_COLUMNS = [
-    "**Against** — the club you are checking. Everyone in the tables scored against them.",
-    "**Matches back** — All is every regular-season game this season at the venue you picked. 5, 3, and 1 keep only that many most recent home games, away games, or games of either. **Next**, under that control, is Against's upcoming game: opponent, home or away, tip time in Athens, and win chance.",
-    "**Venue** — Home, Away, or Both. That is where Against played.",
-    "**Played** — the club that faced Against. **H/A**, **Score**, and **Result** are for Against. Score lists Against first. Result is Won or Lost.",
-    "**Top G / Top F / Top C** — the player at that position with the highest fantasy against Against in that game. Fantasy is PIR, or PIR plus 10% when his club won.",
-    "**Avg** — total fantasy that position scored against Against in the games shown, divided by how many games are shown. A game with nobody at that position counts as zero. That is the same game pie as Matchup.",
+    "**Defense of** — the club you are checking. Everyone in the tables scored against them.",
+    "**Matches back** — All is every regular-season game this season at the venue you picked. 5, 3, and 1 keep only that many most recent home games, away games, or games of either. **Next**, under that control, is that club's upcoming game: opponent, home or away, tip time in Athens, and win chance.",
+    "**Venue** — Home, Away, or Both. That is where the chosen club played.",
+    "**Played** — the club that faced them. **H/A**, **Score**, and **Result** are for the chosen club. Score lists the chosen club first. Result is Won or Lost.",
+    "**Top G / Top F / Top C** — the player at that position with the highest fantasy against the chosen club in that game. Fantasy is PIR, or PIR plus 10% when his club won.",
+    "**Avg** — total fantasy that position scored against the chosen club in the games shown, divided by how many games are shown. A game with nobody at that position counts as zero. That is the same game pie as Next opponent.",
     "**League** — the average game pie at that position for every club this season, home and away together.",
     "**Factor** — Avg divided by League. Above 1 means opponents scored more against this club than in a typical game. Colors compare the same position across clubs for this venue and window. Yellow is the middle half.",
-    "**Player** — someone who played minutes against Against. Highest fantasy is first. The same player appears again if the clubs met twice.",
-    "**Team** on a player row — his club, the side that scored on Against.",
+    "**Player** — someone who played minutes against the chosen club. Highest fantasy is first. The same player appears again if the clubs met twice.",
+    "**Team** on a player row — his club, the side that scored on the chosen club.",
     "**Pos** — G, F, or C from the Fantasy Challenge list, the same slot as the player board.",
     "**H/A** on a player row — where he played. **Min** is his minutes in that game. **Fpts** is his fantasy score in that game. **Price** is his current Fantasy Challenge cost.",
     "**Fpts** on this page is red when it is below the whole number of his price, yellow from that whole number up to 1.1 times his price, and green when it is higher than that. A price of 11.9 and a score of 11 is yellow. A missing price is not colored.",
@@ -201,6 +200,17 @@ def _round(value, digits=1):
     if pd.isna(value):
         return None
     return round(float(value), digits)
+
+
+def _cell(value):
+    if isinstance(value, float):
+        return f"{value:g}"
+    return value
+
+
+def _style(view: pd.DataFrame):
+    """Styler that shows the rounded values as they are and blanks for missing ones."""
+    return view.style.format(_cell, na_rep="")
 
 
 def _owned_label(value) -> str | None:
@@ -249,7 +259,7 @@ def _color_by_position(source: pd.DataFrame, defense: pd.DataFrame, key: str) ->
 
 
 def _paint_matchup(view: pd.DataFrame, source: pd.DataFrame, defense: pd.DataFrame, columns: dict[str, str]):
-    styler = view.style
+    styler = _style(view)
     for key, display in columns.items():
         if display not in view.columns or key not in source.columns:
             continue
@@ -282,7 +292,7 @@ def _paint(
     lower: set[str] | None = None,
 ):
     lower_keys = set(LOWER_COLUMNS) if lower is None else lower
-    styler = view.style
+    styler = _style(view)
     for key, display in columns.items():
         if key not in bands or display not in view.columns or key not in source.columns:
             continue
@@ -589,10 +599,10 @@ def _show_differentials(projections: pd.DataFrame, held_ids: list[str] | None = 
 
 
 def _page_matchup(data) -> None:
-    st.subheader("Matchup")
+    st.subheader("Next opponent")
     st.caption(
         "One club’s next game. Opponent G/F/C allowed is the fantasy that whole position scored in a game "
-        "(this season). Factor is ALL versus League this season. vs last yr is that ratio pulled toward last season, and is what Projected uses."
+        "(this season). Factor is ALL versus League this season once the opponent has played, and is what Projected uses."
     )
     _show_columns(MATCHUP_COLUMNS + PLAYER_COLUMNS + COACH_COLUMNS)
     if data.defense.empty:
@@ -629,15 +639,13 @@ def _page_matchup(data) -> None:
         "l10",
         "opp_allowed",
         "league_allowed",
-        "opp_factor_raw",
         "opp_factor",
     ]
     table = defense[keep_cols].copy()
     numeric = table.copy()
     for column in ("l3", "l5", "l10", "opp_allowed", "league_allowed"):
         table[column] = table[column].map(lambda value: _round(value, 1))
-    for column in ("opp_factor_raw", "opp_factor"):
-        table[column] = table[column].map(lambda value: _round(value, 2))
+    table["opp_factor"] = table["opp_factor"].map(lambda value: _round(value, 2))
     table = table.rename(
         columns={
             "position_group": "Pos",
@@ -646,8 +654,7 @@ def _page_matchup(data) -> None:
             "l10": "L10",
             "opp_allowed": "ALL",
             "league_allowed": "League",
-            "opp_factor_raw": "Factor",
-            "opp_factor": "vs last yr",
+            "opp_factor": "Factor",
         }
     )
     painted = _paint_matchup(
@@ -659,16 +666,21 @@ def _page_matchup(data) -> None:
             "l5": "L5",
             "l10": "L10",
             "opp_allowed": "ALL",
-            "opp_factor_raw": "Factor",
-            "opp_factor": "vs last yr",
+            "opp_factor": "Factor",
         },
     )
+    st.markdown(f"How **{first['opponent_name']}** defends each position")
     st.dataframe(painted, hide_index=True, width="stretch")
     games = int(first["defense_games"]) if "defense_games" in first.index else 0
+    basis = (
+        f"Factor is ALL / League this season ({games} games for this opponent)"
+        if games
+        else "This opponent has no game this season yet, so Factor is last season's"
+    )
     st.caption(
         "Same idea as a game pie, not a starter cloned onto every player: ALL is total G, F, or C fantasy "
-        "allowed in a game this season. L3/L5/L10 are the last 3/5/10 games. Factor is ALL / League this season. "
-        f"vs last yr is that ratio pulled toward last season ({games} games for this opponent) and is used in Projected. "
+        "allowed in a game this season. L3/L5/L10 are the last 3/5/10 games. "
+        f"{basis}. It is the Opp factor on every player row and is used in Projected and Best team. "
         "Four centers share the C pie. Colors compare the same position across clubs; yellow is the middle half "
         "(25th–75th percentile). Price is not colored."
     )
@@ -804,7 +816,7 @@ def _norms_view(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def _show_next_matchup(data, team_code: str) -> None:
-    """Against's upcoming game: opponent, venue, tip, and win chance."""
+    """The chosen club's upcoming game: opponent, venue, tip, and win chance."""
     defense = data.defense
     rows = defense[defense["team_code"] == team_code] if defense is not None and not defense.empty else defense
     if rows is None or rows.empty:
@@ -853,13 +865,13 @@ def _styled_past(lines: pd.DataFrame):
     paint = {"red": BAD, "yellow": MID, "green": GOOD}
     colors = [_fpts_cost_band(points, cost) for points, cost in zip(lines["fantasy"], costs)]
     styles = [paint.get(band, "") for band in colors]
-    return view.style.apply(lambda _column, styles=styles: styles, subset=["Fpts"])
+    return _style(view).apply(lambda _column, styles=styles: styles, subset=["Fpts"])
 
 
 def _page_past(data) -> None:
-    st.subheader("Previous matchups")
+    st.subheader("Opponent defense")
     st.caption(
-        "Against is the club opponents scored on. Pick home or away, and how far back to look. "
+        "Pick a club to see what every opponent scored against it this season. Pick home or away, and how far back to look. "
         "Avg is the game pie for those games. Factor divides it by the league pie. "
         "A win is PIR plus 10%; a loss is PIR."
     )
@@ -877,7 +889,7 @@ def _page_past(data) -> None:
     with pick_col:
         team_col, venue_col = st.columns(2)
         with team_col:
-            team_name = st.selectbox("Against", list(labels), key="past_team")
+            team_name = st.selectbox("Defense of", list(labels), key="past_team")
         with venue_col:
             venue = st.selectbox("Venue", ["Both", "Home", "Away"], key="past_venue")
     with side_col:
@@ -1625,7 +1637,7 @@ def _page_best(data) -> None:
         "Type the credits you have. Ten players are chosen from published prices, and the coach is chosen the same way among coaches with typed credits. "
         "Player prices and the Credits bank come from Refresh data with your Fan ID, not from Import. Import on My team only copies the saved lineup. "
         "Select a saved team to see who would come in and who would go out after the suggestion. "
-        "Each round's projection already includes that opponent, home or away, and win chance (the same matchup used on Matchup). Opponent G/F/C is the game pie versus the league, not one star cloned onto every player. "
+        "Each round's projection already includes that opponent, home or away, and win chance (the same matchup used on Next opponent). Opponent G/F/C is the game pie versus the league, not one star cloned onto every player. "
         "A player who has played this season is scored from this season only. Last season is used only when he has no game yet. "
         "Out and unconfirmed players are left out. If someone just went out (same games played as his club), his minutes go to remaining Available teammates (60% same position). If he already missed games in the sample, those averages already include the extra time, so it is not added again. When he returns, teammate minutes go back toward normal. "
         "The bench is players expected to play at least 15 minutes, with one center kept off the starting five. "
@@ -2112,11 +2124,12 @@ def main() -> None:
         "Personal dashboard for the EuroLeague Fantasy Challenge. "
         "Stats come from the public Euroleague feeds. Player credits come from your Fantasy Challenge login when configured, otherwise the public list."
     )
-    if st.session_state.get("page") == "Past matches":
-        st.session_state["page"] = "Previous matchups"
+    renamed = {"Past matches": "Opponent defense", "Previous matchups": "Opponent defense", "Matchup": "Next opponent"}
+    if st.session_state.get("page") in renamed:
+        st.session_state["page"] = renamed[st.session_state["page"]]
     page = st.sidebar.radio(
         "Page",
-        ["Player board", "Matchup", "Previous matchups", "Best team", "My team"],
+        ["Player board", "Next opponent", "Opponent defense", "Best team", "My team"],
         key="page",
     )
     if st.sidebar.button("Refresh data", key="refresh"):
@@ -2182,9 +2195,9 @@ def main() -> None:
 
     if page == "Player board":
         _page_board(data)
-    elif page == "Matchup":
+    elif page == "Next opponent":
         _page_matchup(data)
-    elif page == "Previous matchups":
+    elif page == "Opponent defense":
         _page_past(data)
     elif page == "Best team":
         _page_best(data)

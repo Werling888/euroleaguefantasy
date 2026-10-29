@@ -55,7 +55,7 @@ class GamePieTest(unittest.TestCase):
             rows.append(_row(PRIOR_SEASON, f"P{index}", 80 + index, "C", 21.0, 20.0, "2026-01-02"))
         profiles, league, _games, prior_league, prior_allowed = _defense_profiles(pd.DataFrame(rows))
         factor = _opponent_factor("PRS", "C", league, profiles, prior_league, prior_allowed)
-        self.assertLess(factor, 1.40)
+        self.assertAlmostEqual(factor, 30.8 / league["C"], places=5)
         projected = 13.2 * factor * (1.0 + 0.10 * 0.71)
         self.assertLess(projected, 22.0)
         self.assertGreater(projected, 10.0)
@@ -106,6 +106,27 @@ class GamePieTest(unittest.TestCase):
         self.assertAlmostEqual(_season_factor(46.0, 44.4), 46.0 / 44.4, places=5)
         self.assertIsNone(_season_factor(46.0, 0.0))
         self.assertIsNone(_season_factor(None, 44.4))
+
+    def test_one_game_uses_this_season_not_last(self) -> None:
+        rows = [
+            _row(CURRENT_SEASON, "PRS", 1, "G", 60.0, 30.0, "2026-09-25"),
+            _row(CURRENT_SEASON, "MIL", 2, "G", 40.0, 30.0, "2026-09-25"),
+            _row(PRIOR_SEASON, "PRS", 90, "G", 20.0, 30.0, "2026-01-01"),
+            _row(PRIOR_SEASON, "MIL", 91, "G", 40.0, 30.0, "2026-01-01"),
+        ]
+        profiles, league, _games, prior_league, prior_allowed = _defense_profiles(pd.DataFrame(rows))
+        factor = _opponent_factor("PRS", "G", league, profiles, prior_league, prior_allowed)
+        self.assertAlmostEqual(factor, 60.0 / 50.0, places=5)
+
+    def test_no_game_this_season_uses_last_season(self) -> None:
+        rows = [
+            _row(CURRENT_SEASON, "MIL", 2, "G", 40.0, 30.0, "2026-09-25"),
+            _row(PRIOR_SEASON, "PRS", 90, "G", 33.0, 30.0, "2026-01-01"),
+            _row(PRIOR_SEASON, "MIL", 91, "G", 27.0, 30.0, "2026-01-01"),
+        ]
+        profiles, league, _games, prior_league, prior_allowed = _defense_profiles(pd.DataFrame(rows))
+        factor = _opponent_factor("PRS", "G", league, profiles, prior_league, prior_allowed)
+        self.assertAlmostEqual(factor, 33.0 / 30.0, places=5)
 
     def test_shrink_can_sit_below_one_when_this_season_is_above(self) -> None:
         raw = _season_factor(46.0, 44.4)
